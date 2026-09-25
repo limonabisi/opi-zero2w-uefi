@@ -10,7 +10,7 @@ map -r
 echo "== SD kart (fs0:) =="
 ls fs0:\
 echo "== Bellek haritasi =="
-memmap -b
+memmap
 echo "== EFI tablolari (DTB Table dolu olmali) =="
 dmem
 # Linux / GRUB EFI dosyasi varsa onu calistir:
