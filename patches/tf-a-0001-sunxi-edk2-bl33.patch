@@ -1,5 +1,5 @@
 diff --git a/plat/allwinner/common/sunxi_bl31_setup.c b/plat/allwinner/common/sunxi_bl31_setup.c
-index 263083b..1c76d02 100644
+index 263083b..d8f65b5 100644
 --- a/plat/allwinner/common/sunxi_bl31_setup.c
 +++ b/plat/allwinner/common/sunxi_bl31_setup.c
 @@ -75,6 +75,19 @@ static void sunxi_find_dtb(void)
@@ -22,7 +22,34 @@ index 263083b..1c76d02 100644
  }
  
  void bl31_early_platform_setup2(u_register_t arg0, u_register_t arg1,
-@@ -185,6 +198,30 @@ void bl31_plat_runtime_setup(void)
+@@ -134,6 +147,7 @@ void bl31_platform_setup(void)
+ 		break;
+ 	}
+ 	NOTICE("BL31: Detected Allwinner %s SoC (%04x)\n", soc_name, soc_id);
++	NOTICE("BL31: OPi Zero 2W EDK2 patch v0.1.8\n");
+ 
+ 	generic_delay_timer_init();
+ 
+@@ -176,7 +190,17 @@ void bl31_platform_setup(void)
+ 	if (soc_id == SUNXI_SOC_A64 || soc_id == SUNXI_SOC_H5)
+ 		mmio_write_32(SUNXI_CCU_BASE + 0x5c, 0x1);
+ 
+-	sunxi_pmic_setup(soc_id, fdt);
++	/*
++	 * Without a DTB the PMIC code would dereference a NULL fdt (address 0
++	 * is not mapped in BL31 -> EL3 data abort -> panic). U-Boot proper
++	 * always provides a DTB so this path is never hit there; EDK2 as BL33
++	 * does not. The AXP313 on the Orange Pi Zero 2W needs no BL31 setup.
++	 */
++	if (fdt != NULL) {
++		sunxi_pmic_setup(soc_id, fdt);
++	} else {
++		NOTICE("BL31: no DTB, skipping PMIC setup\n");
++	}
+ 
+ 	INFO("BL31: Platform setup done\n");
+ }
+@@ -185,6 +209,30 @@ void bl31_plat_runtime_setup(void)
  {
  	/* Change the DTB if the configuration requires so. */
  	sunxi_prepare_dtb(fdt);
