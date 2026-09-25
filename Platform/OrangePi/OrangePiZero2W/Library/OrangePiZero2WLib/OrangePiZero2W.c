@@ -39,7 +39,8 @@ ArmPlatformInitialize (
 {
   //
   // U-Boot SPL has already muxed PH0/PH1 to UART0 and enabled its clock,
-  // and TF-A BL31 has been printing on it, so the console just works.
+  // and TF-A BL31 has been printing on it, so the console just works
+  // (SunxiSerialPortLib does not reprogram it).
   //
   SerialPortInitialize ();
   SerialPortWrite ((UINT8 *)mBanner, sizeof (mBanner) - 1);

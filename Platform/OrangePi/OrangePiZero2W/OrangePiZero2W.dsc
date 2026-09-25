@@ -76,7 +76,7 @@
   FdtLib|MdePkg/Library/BaseFdtLib/BaseFdtLib.inf
 
   # Console: Allwinner UART0 is a DesignWare 16550 (reg-shift 2, 32-bit access)
-  SerialPortLib|MdeModulePkg/Library/BaseSerialPortLib16550/BaseSerialPortLib16550.inf
+  SerialPortLib|Silicon/Allwinner/H616Pkg/Library/SunxiSerialPortLib/SunxiSerialPortLib.inf
   PlatformHookLib|MdeModulePkg/Library/BasePlatformHookLibNull/BasePlatformHookLibNull.inf
   PciLib|MdePkg/Library/BasePciLibPciExpress/BasePciLibPciExpress.inf
   PciExpressLib|MdePkg/Library/BasePciExpressLib/BasePciExpressLib.inf
