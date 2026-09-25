@@ -1,0 +1,31 @@
+[Defines]
+  INF_VERSION                    = 0x0001001A
+  BASE_NAME                      = QemuVirtioMmioDxe
+  FILE_GUID                      = 2c0f8a51-7e3d-4b69-a1c4-5d8e9f0b3a27
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = QemuVirtioMmioDxeInitialize
+
+[Sources]
+  QemuVirtioMmioDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  OvmfPkg/OvmfPkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  DebugLib
+  DevicePathLib
+  IoLib
+  MemoryAllocationLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+  VirtioMmioDeviceLib
+  NonDiscoverableDeviceRegistrationLib
+
+[Protocols]
+  gEfiDevicePathProtocolGuid
+
+[Depex]
+  TRUE

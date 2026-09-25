@@ -7,10 +7,10 @@ set -euo pipefail
 TOP="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${SRC:-$TOP/src}"
 TARGET="${1:-DEBUG}"
-OUT="$TOP/out"; mkdir -p "$OUT"
+OUT="${OUT:-$TOP/out}"; mkdir -p "$OUT"
 SPL="$SRC/u-boot/spl/sunxi-spl.bin"
 BL31="$SRC/tf-a/build/sun50i_h616/release/bl31.bin"
-FD="$TOP/build/edk2-ws/Build/OrangePiZero2W/${TARGET}_GCC/FV/OPIZERO2W_EFI.fd"
+FD="${FD:-$TOP/build/edk2-ws/Build/OrangePiZero2W/${TARGET}_GCC/FV/OPIZERO2W_EFI.fd}"
 DTB="$TOP/Platform/OrangePi/OrangePiZero2W/DeviceTree/sun50i-h618-orangepi-zero2w.dtb"
 for f in "$SPL" "$BL31" "$FD" "$DTB"; do [ -f "$f" ] || { echo "missing: $f"; exit 1; }; done
 

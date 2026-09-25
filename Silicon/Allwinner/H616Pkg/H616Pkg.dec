@@ -27,3 +27,13 @@
   # FALSE: ignore everything arriving on UART0 RX (for setups where only TX is
   # wired, or RX is noisy). Keyboard input must then come from elsewhere.
   gH616TokenSpaceGuid.PcdSunxiUartInputEnable|FALSE|BOOLEAN|0x00000010
+
+[PcdsFixedAtBuild]
+  # SD-backed NV variable store inside the FD (see OrangePiZero2W.fdf and
+  # Platform/.../Drivers/VarBlockServiceDxe). Bases are set by the FDF.
+  gH616TokenSpaceGuid.PcdFirmwareBlockSize|0x1000|UINT32|0x00000020
+  gH616TokenSpaceGuid.PcdNvStorageVariableBase|0x0|UINT32|0x00000021
+  gH616TokenSpaceGuid.PcdNvStorageEventLogBase|0x0|UINT32|0x00000022
+  gH616TokenSpaceGuid.PcdNvStorageEventLogSize|0x0|UINT32|0x00000023
+  gH616TokenSpaceGuid.PcdNvStorageFtwWorkingBase|0x0|UINT32|0x00000024
+  gH616TokenSpaceGuid.PcdNvStorageFtwSpareBase|0x0|UINT32|0x00000025

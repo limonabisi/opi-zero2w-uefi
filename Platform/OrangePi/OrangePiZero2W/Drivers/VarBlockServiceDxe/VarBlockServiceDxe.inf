@@ -1,0 +1,78 @@
+## @file
+#  Memory-mapped FVB for the UEFI variable store, persisted to the microSD
+#  card (the NV store is part of the FD inside the FIT image).
+#  Based on Platform/RaspberryPi/Drivers/VarBlockServiceDxe.
+#
+#  Copyright (c) 2018, Andrei Warkentin <andrey.warkentin@gmail.com>
+#  Copyright (c) 2006-2013, Intel Corporation. All rights reserved.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x0001001A
+  BASE_NAME                      = OpiVarBlockServiceDxe
+  FILE_GUID                      = 4e1d8c2a-6f3b-4a57-9c80-2d5e7b1f9a64
+  MODULE_TYPE                    = DXE_RUNTIME_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = FvbInitialize
+
+[Sources]
+  FvbInfo.c
+  VarBlockService.h
+  VarBlockService.c
+  VarBlockServiceDxe.c
+
+[Packages]
+  ArmPkg/ArmPkg.dec
+  EmbeddedPkg/EmbeddedPkg.dec
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  Silicon/Allwinner/H616Pkg/H616Pkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  DevicePathLib
+  DxeServicesTableLib
+  FdtLib
+  MemoryAllocationLib
+  PcdLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+  UefiRuntimeLib
+
+[Guids]
+  gEdkiiNvVarStoreFormattedGuid                 ## PRODUCES
+  gEfiEventVirtualAddressChangeGuid
+  gEfiEventReadyToBootGuid
+  gEfiEventExitBootServicesGuid
+  gEfiSystemNvDataFvGuid
+
+[Protocols]
+  gEfiLoadedImageProtocolGuid
+  gEfiBlockIoProtocolGuid
+  gEfiFirmwareVolumeBlockProtocolGuid
+  gEfiDevicePathProtocolGuid
+  gEfiResetNotificationProtocolGuid
+
+[FixedPcd]
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageVariableSize
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwWorkingSize
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwSpareSize
+  gH616TokenSpaceGuid.PcdNvStorageVariableBase
+  gH616TokenSpaceGuid.PcdNvStorageFtwWorkingBase
+  gH616TokenSpaceGuid.PcdNvStorageFtwSpareBase
+  gH616TokenSpaceGuid.PcdNvStorageEventLogSize
+  gH616TokenSpaceGuid.PcdFirmwareBlockSize
+  gArmTokenSpaceGuid.PcdFdBaseAddress
+  gArmTokenSpaceGuid.PcdFdSize
+
+[Pcd]
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwWorkingBase
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwSpareBase
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageVariableBase64
+
+[Depex]
+  TRUE

@@ -13,9 +13,70 @@ ErasePolarity = 1
 BlockSize     = 0x00001000
 NumBlocks     = 0x100
 
-0x00000000|0x00100000
+0x00000000|0x000E0000
 gArmTokenSpaceGuid.PcdFvBaseAddress|gArmTokenSpaceGuid.PcdFvSize
 FV = FVMAIN_COMPACT
+
+#
+# 128 KiB NV store (UEFI variables + fault tolerant write). VarBlockServiceDxe
+# copies it to runtime memory at boot and writes it back to this very spot
+# of the FD image on the microSD card when variables change. Same layout and
+# initial headers as the Raspberry Pi 4 port.
+#
+# NV_VARIABLE_STORE
+0x000E0000|0x0000E000
+gH616TokenSpaceGuid.PcdNvStorageVariableBase|gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageVariableSize
+DATA = {
+  ## EFI_FIRMWARE_VOLUME_HEADER
+  # ZeroVector []
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  # FileSystemGuid: gEfiSystemNvDataFvGuid
+  0x8D, 0x2B, 0xF1, 0xFF, 0x96, 0x76, 0x8B, 0x4C,
+  0xA9, 0x85, 0x27, 0x47, 0x07, 0x5B, 0x4F, 0x50,
+  # FvLength: 0x20000
+  0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+  # Signature "_FVH"       # Attributes
+  0x5f, 0x46, 0x56, 0x48, 0xff, 0xfe, 0x04, 0x00,
+  # HeaderLength
+  0x48, 0x00,
+  # CheckSum
+  0x19, 0xF9,
+  # ExtHeaderOffset #Reserved #Revision
+  0x00, 0x00, 0x00, 0x02,
+  # Blockmap[0]: 0x20 Blocks * 0x1000 Bytes / Block
+  0x20, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
+  # Blockmap[1]: End
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  ## VARIABLE_STORE_HEADER, Signature gEfiAuthenticatedVariableGuid
+  0x78, 0x2c, 0xf3, 0xaa, 0x7b, 0x94, 0x9a, 0x43,
+  0xa1, 0x80, 0x2e, 0x14, 0x4e, 0xc3, 0x77, 0x92,
+  # Size: 0xe000 - 0x48 = 0xdfb8
+  0xB8, 0xDF, 0x00, 0x00,
+  # FORMATTED: 0x5A #HEALTHY: 0xFE #Reserved: UINT16 #Reserved1: UINT32
+  0x5A, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+}
+
+# NV_EVENT_LOG
+0x000EE000|0x00001000
+gH616TokenSpaceGuid.PcdNvStorageEventLogBase|gH616TokenSpaceGuid.PcdNvStorageEventLogSize
+
+# NV_FTW_WORKING header
+0x000EF000|0x00001000
+gH616TokenSpaceGuid.PcdNvStorageFtwWorkingBase|gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwWorkingSize
+DATA = {
+  # EFI_FAULT_TOLERANT_WORKING_BLOCK_HEADER->Signature = gEdkiiWorkingBlockSignatureGuid
+  0x2b, 0x29, 0x58, 0x9e, 0x68, 0x7c, 0x7d, 0x49,
+  0xa0, 0xce, 0x65,  0x0, 0xfd, 0x9f, 0x1b, 0x95,
+  # Crc:UINT32            #WorkingBlockValid:1, WorkingBlockInvalid:1, Reserved
+  0x2c, 0xaf, 0x2c, 0x64, 0xFE, 0xFF, 0xFF, 0xFF,
+  # WriteQueueSize: UINT64
+  0xE0, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+}
+
+# NV_FTW_SPARE
+0x000F0000|0x00010000
+gH616TokenSpaceGuid.PcdNvStorageFtwSpareBase|gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwSpareSize
 
 ################################################################################
 [FV.FvMain]
@@ -51,6 +112,8 @@ READ_LOCK_STATUS   = TRUE
   INF MdeModulePkg/Core/RuntimeDxe/RuntimeDxe.inf
   INF MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
   INF MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
+  INF Platform/OrangePi/OrangePiZero2W/Drivers/VarBlockServiceDxe/VarBlockServiceDxe.inf
+  INF MdeModulePkg/Universal/FaultTolerantWriteDxe/FaultTolerantWriteDxe.inf
   INF MdeModulePkg/Universal/Variable/RuntimeDxe/VariableRuntimeDxe.inf
   INF MdeModulePkg/Universal/MonotonicCounterRuntimeDxe/MonotonicCounterRuntimeDxe.inf
   INF MdeModulePkg/Universal/ResetSystemRuntimeDxe/ResetSystemRuntimeDxe.inf
@@ -72,6 +135,9 @@ READ_LOCK_STATUS   = TRUE
 
 !ifndef QEMU_TEST
   INF Silicon/Allwinner/H616Pkg/Drivers/SunxiMmcDxe/SunxiMmcDxe.inf
+!else
+  INF Platform/OrangePi/OrangePiZero2W/Drivers/QemuVirtioMmioDxe/QemuVirtioMmioDxe.inf
+  INF OvmfPkg/VirtioBlkDxe/VirtioBlk.inf
 !endif
   INF Platform/OrangePi/OrangePiZero2W/Drivers/FdtDxe/FdtDxe.inf
   INF MdeModulePkg/Universal/SmbiosDxe/SmbiosDxe.inf
@@ -85,6 +151,7 @@ READ_LOCK_STATUS   = TRUE
 !endif
   INF MdeModulePkg/Bus/Pci/NonDiscoverablePciDeviceDxe/NonDiscoverablePciDeviceDxe.inf
   INF MdeModulePkg/Bus/Pci/EhciDxe/EhciDxe.inf
+  INF Silicon/Allwinner/H616Pkg/Drivers/OhciDxe/OhciDxe.inf
   INF MdeModulePkg/Bus/Usb/UsbBusDxe/UsbBusDxe.inf
   INF MdeModulePkg/Bus/Usb/UsbKbDxe/UsbKbDxe.inf
   INF MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassStorageDxe.inf

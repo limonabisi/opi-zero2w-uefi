@@ -120,7 +120,11 @@
   BmpSupportLib|MdeModulePkg/Library/BaseBmpSupportLib/BaseBmpSupportLib.inf
   SecurityManagementLib|MdeModulePkg/Library/DxeSecurityManagementLib/DxeSecurityManagementLib.inf
 
+!ifdef QEMU_TEST
   RealTimeClockLib|EmbeddedPkg/Library/VirtualRealTimeClockLib/VirtualRealTimeClockLib.inf
+!else
+  RealTimeClockLib|Silicon/Allwinner/H616Pkg/Library/H616RealTimeClockLib/H616RealTimeClockLib.inf
+!endif
   TimeBaseLib|EmbeddedPkg/Library/TimeBaseLib/TimeBaseLib.inf
 
   # Variables are kept in RAM (no SPI NOR driver yet)
@@ -195,7 +199,7 @@
 
 [PcdsFixedAtBuild.common]
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"Orange Pi Zero 2W EDK2 port"
-  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.3.2-h618"
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.4.0-h618"
 
   gEfiMdePkgTokenSpaceGuid.PcdMaximumUnicodeStringLength|1000000
   gEfiMdePkgTokenSpaceGuid.PcdMaximumAsciiStringLength|1000000
@@ -271,8 +275,13 @@
   gEfiMdeModulePkgTokenSpaceGuid.PcdResetOnMemoryTypeInformationChange|FALSE
   gEfiMdeModulePkgTokenSpaceGuid.PcdBootManagerMenuFile|{ 0x21, 0xaa, 0x2c, 0x46, 0x14, 0x76, 0x03, 0x45, 0x83, 0x6e, 0x8a, 0xb6, 0xf4, 0x66, 0x23, 0x31 }
 
-  # RAM-backed variable store
-  gEfiMdeModulePkgTokenSpaceGuid.PcdEmuVariableNvModeEnable|TRUE
+  # Variable store: 128 KiB NV area inside the FD, saved back to the SD card
+  # by VarBlockServiceDxe (layout in OrangePiZero2W.fdf)
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageVariableSize|0xE000
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwWorkingSize|0x1000
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwSpareSize|0x10000
+  gH616TokenSpaceGuid.PcdFirmwareBlockSize|0x1000
+  gH616TokenSpaceGuid.PcdNvStorageEventLogSize|0x1000
   gEfiMdeModulePkgTokenSpaceGuid.PcdMaxVariableSize|0x2000
   gEfiMdeModulePkgTokenSpaceGuid.PcdMaxAuthVariableSize|0x2800
   gEfiMdeModulePkgTokenSpaceGuid.PcdVariableStoreSize|0x10000
@@ -300,6 +309,11 @@
 !endif
 
 [PcdsDynamicDefault.common]
+  # Set at runtime by VarBlockServiceDxe (NV store copied to runtime memory)
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageVariableBase64|0
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwWorkingBase|0
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwSpareBase|0
+
   # No keyboard input possible on this setup -> short timeout, then autoboot
   gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut|3
   gEfiMdeModulePkgTokenSpaceGuid.PcdBootDiscoveryPolicy|2
@@ -334,8 +348,14 @@
   MdeModulePkg/Core/RuntimeDxe/RuntimeDxe.inf
   MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
   MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
+  Platform/OrangePi/OrangePiZero2W/Drivers/VarBlockServiceDxe/VarBlockServiceDxe.inf
+  MdeModulePkg/Universal/FaultTolerantWriteDxe/FaultTolerantWriteDxe.inf {
+    <LibraryClasses>
+      NULL|EmbeddedPkg/Library/NvVarStoreFormattedLib/NvVarStoreFormattedLib.inf
+  }
   MdeModulePkg/Universal/Variable/RuntimeDxe/VariableRuntimeDxe.inf {
     <LibraryClasses>
+      NULL|EmbeddedPkg/Library/NvVarStoreFormattedLib/NvVarStoreFormattedLib.inf
       NULL|MdeModulePkg/Library/VarCheckUefiLib/VarCheckUefiLib.inf
       BaseMemoryLib|MdePkg/Library/BaseMemoryLib/BaseMemoryLib.inf
   }
@@ -369,6 +389,15 @@
   #
 !ifndef QEMU_TEST
   Silicon/Allwinner/H616Pkg/Drivers/SunxiMmcDxe/SunxiMmcDxe.inf
+!else
+  Platform/OrangePi/OrangePiZero2W/Drivers/QemuVirtioMmioDxe/QemuVirtioMmioDxe.inf {
+    <LibraryClasses>
+      VirtioMmioDeviceLib|OvmfPkg/Library/VirtioMmioDeviceLib/VirtioMmioDeviceLib.inf
+  }
+  OvmfPkg/VirtioBlkDxe/VirtioBlk.inf {
+    <LibraryClasses>
+      VirtioLib|OvmfPkg/Library/VirtioLib/VirtioLib.inf
+  }
 !endif
   Platform/OrangePi/OrangePiZero2W/Drivers/FdtDxe/FdtDxe.inf
   MdeModulePkg/Universal/SmbiosDxe/SmbiosDxe.inf
@@ -382,6 +411,7 @@
 !endif
   MdeModulePkg/Bus/Pci/NonDiscoverablePciDeviceDxe/NonDiscoverablePciDeviceDxe.inf
   MdeModulePkg/Bus/Pci/EhciDxe/EhciDxe.inf
+  Silicon/Allwinner/H616Pkg/Drivers/OhciDxe/OhciDxe.inf
   MdeModulePkg/Bus/Usb/UsbBusDxe/UsbBusDxe.inf
   MdeModulePkg/Bus/Usb/UsbKbDxe/UsbKbDxe.inf
   MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassStorageDxe.inf

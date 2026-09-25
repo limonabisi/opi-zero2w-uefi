@@ -60,7 +60,7 @@ index 64da8d7..8a72012 100644
    }
  }
 diff --git a/MdeModulePkg/Bus/Usb/UsbBusDxe/UsbHub.c b/MdeModulePkg/Bus/Usb/UsbBusDxe/UsbHub.c
-index 5503230..17a0321 100644
+index 5503230..39ac88e 100644
 --- a/MdeModulePkg/Bus/Usb/UsbBusDxe/UsbHub.c
 +++ b/MdeModulePkg/Bus/Usb/UsbBusDxe/UsbHub.c
 @@ -1145,6 +1145,7 @@ UsbRootHubResetPort (
@@ -71,7 +71,7 @@ index 5503230..17a0321 100644
  
    //
    // Notice: although EHCI requires that ENABLED bit be cleared
-@@ -1153,64 +1154,95 @@ UsbRootHubResetPort (
+@@ -1153,64 +1154,99 @@ UsbRootHubResetPort (
    //
    Bus = RootIf->Device->Bus;
  
@@ -85,9 +85,11 @@ index 5503230..17a0321 100644
    //
 -  // Drive the reset signal for at least 50ms. Check USB 2.0 Spec
 -  // section 7.1.7.5 for timing requirements.
-+  // OPi Zero 2W / H616: the EHCI line state can read K for a while right
-+  // after a hub powers up.  Resetting then never completes, so give the
-+  // line up to 1 s to settle to J/SE0 first.
++  // OPi Zero 2W / H616: a K line state on an EHCI root port means a
++  // low-speed device (or a bouncing connect).  The H616 EHCI never
++  // finishes a port reset in that state, so wait up to 200 ms for the line
++  // to settle and otherwise hand the port to the companion OHCI right away,
++  // as the EHCI spec asks for low-speed devices.
    //
 -  gBS->Stall (USB_SET_ROOT_PORT_RESET_STALL);
 -
@@ -106,7 +108,7 @@ index 5503230..17a0321 100644
 -        DEBUG ((DEBUG_INFO, "This is a USB 3 device and it need a longer waiting time for super speed.\n"));
 -        gBS->Stall (USB_WAIT_PORT_STABLE_STALL);
 +  if (RootIf->MaxSpeed == EFI_USB_SPEED_HIGH) {
-+    for (Index = 0; Index < 20; Index++) {
++    for (Index = 0; Index < 4; Index++) {
 +      ZeroMem (&PortState, sizeof (EFI_USB_PORT_STATUS));
 +      Status = UsbHcGetRootHubPortStatus (Bus, Port, &PortState);
 +      if (EFI_ERROR (Status) || !USB_BIT_IS_SET (PortState.PortStatus, USB_PORT_STAT_LOW_SPEED)) {
@@ -116,8 +118,10 @@ index 5503230..17a0321 100644
 +      gBS->Stall (50 * USB_BUS_1_MILLISECOND);
 +    }
 +
-+    if (Index != 0) {
-+      DEBUG ((DEBUG_WARN, "UsbRootHubResetPort: port %d line K for %d ms before reset\n", Port, (UINT32)Index * 50));
++    if (Index == 4) {
++      DEBUG ((DEBUG_INFO, "UsbRootHubResetPort: low-speed device on port %d, releasing it to the companion controller\n", Port));
++      UsbRootHubSetPortFeature (RootIf, Port, EfiUsbPortOwner);
++      return EFI_NOT_FOUND;
      }
    }
  
@@ -207,3 +211,12 @@ index 5503230..17a0321 100644
    }
  
    if (Index == USB_WAIT_PORT_STS_CHANGE_LOOP) {
+@@ -1226,7 +1262,7 @@ UsbRootHubResetPort (
+     // automatically enable the port, we need to enable it manually.
+     //
+     if (RootIf->MaxSpeed == EFI_USB_SPEED_HIGH) {
+-      DEBUG ((DEBUG_ERROR, "UsbRootHubResetPort: release low/full speed device (%d) to UHCI\n", Port));
++      DEBUG ((DEBUG_ERROR, "UsbRootHubResetPort: release low/full speed device (%d) to the companion controller\n", Port));
+ 
+       UsbRootHubSetPortFeature (RootIf, Port, EfiUsbPortOwner);
+       return EFI_NOT_FOUND;
