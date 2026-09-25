@@ -1,0 +1,35 @@
+diff --git a/plat/allwinner/common/sunxi_bl31_setup.c b/plat/allwinner/common/sunxi_bl31_setup.c
+index 263083b..3914eaf 100644
+--- a/plat/allwinner/common/sunxi_bl31_setup.c
++++ b/plat/allwinner/common/sunxi_bl31_setup.c
+@@ -185,6 +185,30 @@ void bl31_plat_runtime_setup(void)
+ {
+ 	/* Change the DTB if the configuration requires so. */
+ 	sunxi_prepare_dtb(fdt);
++
++	/*
++	 * OPi Zero 2W EDK2 bring-up diagnostics: show what sits at the BL33
++	 * entry point, checksum the first 1 MiB (the EDK2 FD) and push it
++	 * out to DRAM so that BL33, which starts with caches off, sees it.
++	 */
++	{
++		const uint32_t *p = (const uint32_t *)PRELOADED_BL33_BASE;
++		uint32_t sum = 0U;
++		unsigned int i;
++
++		for (i = 0U; i < (0x100000U / 4U); i++) {
++			sum += p[i];
++		}
++		NOTICE("BL31: BL33 @ 0x%lx: %08x %08x %08x %08x\n",
++		       (unsigned long)PRELOADED_BL33_BASE, p[0], p[1], p[2], p[3]);
++		NOTICE("BL31: BL33 1MiB sum32 = %08x, entry insn @+0x%x = %08x\n",
++		       sum, (p[0] & 0x3ffffffU) * 4U,
++		       p[((p[0] & 0x3ffffffU) * 4U) / 4U]);
++		flush_dcache_range((uintptr_t)PRELOADED_BL33_BASE, 0x100000U);
++		NOTICE("BL31: jumping to BL33 @ 0x%lx (EL2)\n",
++		       (unsigned long)bl33_image_ep_info.pc);
++		console_flush();
++	}
+ }
+ 
+ entry_point_info_t *bl31_plat_get_next_image_ep_info(uint32_t type)

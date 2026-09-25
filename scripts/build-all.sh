@@ -28,6 +28,11 @@ if [ ! -d "$SRC/edk2" ]; then
 fi
 make -C "$SRC/edk2/BaseTools" -j"$J"
 
+echo "==> TF-A yamalari"
+for p in "$TOP"/patches/tf-a-*.patch; do
+  git -C "$SRC/tf-a" apply --check "$p" 2>/dev/null && git -C "$SRC/tf-a" apply "$p" && echo "  uygulandi: $(basename "$p")" || true
+done
+
 echo "==> TF-A BL31 (sun50i_h616)"
 make -C "$SRC/tf-a" -j"$J" CROSS_COMPILE=aarch64-linux-gnu- PLAT=sun50i_h616 DEBUG=0 bl31
 
