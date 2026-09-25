@@ -199,7 +199,7 @@
 
 [PcdsFixedAtBuild.common]
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"Orange Pi Zero 2W EDK2 port"
-  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.4.0-h618"
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.4.1-h618"
 
   gEfiMdePkgTokenSpaceGuid.PcdMaximumUnicodeStringLength|1000000
   gEfiMdePkgTokenSpaceGuid.PcdMaximumAsciiStringLength|1000000
@@ -314,9 +314,12 @@
   gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwWorkingBase|0
   gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwSpareBase|0
 
-  # No keyboard input possible on this setup -> short timeout, then autoboot
-  gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut|3
   gEfiMdeModulePkgTokenSpaceGuid.PcdBootDiscoveryPolicy|2
+
+[PcdsDynamicHii.common]
+  # Boot timeout lives in the persistent "Timeout" variable, so the value set
+  # in Boot Maintenance Manager survives a reboot. Default: 3 seconds.
+  gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut|L"Timeout"|gEfiGlobalVariableGuid|0x0|3
 
 ################################################################################
 # Components
