@@ -3,8 +3,11 @@
 U-Boot proper yerine **TianoCore EDK2** çalıştıran bir önyükleyici. Hedef: SD karttan açılıp
 UEFI ortamı sunmak (UEFI Shell, FAT, `BOOTAA64.EFI` ile Linux/GRUB başlatma, Device Tree).
 
-> Durum: **derleniyor, donanımda henüz denenmedi (v0.1).** İlk açılışta UART logunu kaydet —
-> hata olursa en hızlı ilerleme o logla olur.
+> Durum (v0.2.0): **donanımda çalışıyor** — SPL → TF-A → EDK2 → UEFI Shell; SD kart (FAT) okunuyor,
+> `startup.nsh` otomatik çalışıyor, DTB EFI tablosunda. Sıradaki adım: Linux açmak.
+>
+> Önemli: TF-A'ya `patches/tf-a-0001-sunxi-edk2-bl33.patch` uygulanmalı (build-all.sh yapıyor).
+> Yamasız BL31, DTB bulamayınca PMIC kodunda NULL okuyup çöküyor.
 
 ## Boot zinciri
 
@@ -81,7 +84,8 @@ sdcard/startup.nsh
 
 ## Yapılacaklar (yol haritası)
 
-1. **Donanım testi** — UART logu ile SPL → BL31 → EDK2 geçişini doğrula.
+1. ~~Donanım testi~~ — tamam: Shell + SD + FAT + DTB çalışıyor.
+1b. Linux: `EFI/BOOT/BOOTAA64.EFI` (GRUB veya EFI stub'lı çekirdek) ile açılış.
 2. SD sürücüsü: DMA (IDMAC) ile hız, kart algılama (PF6).
 3. USB (EHCI1/OHCI1 NonDiscoverable) → USB klavye ile giriş (UART RX olmadan etkileşim).
 4. Kalıcı değişkenler: SPI NOR (varsa) veya SD kartta dosya tabanlı değişken deposu.
