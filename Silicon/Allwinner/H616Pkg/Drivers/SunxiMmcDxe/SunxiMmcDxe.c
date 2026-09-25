@@ -781,13 +781,17 @@ SunxiMmcDxeInitialize (
   mIndex = FixedPcdGet32 (PcdSunxiMmcIndex);
   DEBUG ((DEBUG_INFO, "SunxiMmc: SMHC%u @ 0x%lx\n", mIndex, (UINT64)mBase));
 
+  //
+  // Only the MMC host protocol goes on this handle. MmcDxe builds the
+  // BlockIo child with the device path returned by BuildDevicePath(); if we
+  // installed the same path here too, its InstallMultipleProtocolInterfaces()
+  // would fail with EFI_ALREADY_STARTED and the SD card would never appear.
+  //
   Handle = NULL;
   return gBS->InstallMultipleProtocolInterfaces (
                 &Handle,
                 &gEmbeddedMmcHostProtocolGuid,
                 &mMmcHost,
-                &gEfiDevicePathProtocolGuid,
-                &mDevicePath,
                 NULL
                 );
 }

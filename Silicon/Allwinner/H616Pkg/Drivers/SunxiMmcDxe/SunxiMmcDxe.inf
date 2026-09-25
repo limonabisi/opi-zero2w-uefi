@@ -34,7 +34,6 @@
 
 [Protocols]
   gEmbeddedMmcHostProtocolGuid     ## PRODUCES
-  gEfiDevicePathProtocolGuid       ## PRODUCES
 
 [FixedPcd]
   gH616TokenSpaceGuid.PcdSunxiMmcBase

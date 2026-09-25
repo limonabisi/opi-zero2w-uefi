@@ -350,9 +350,7 @@
   #
   # Board / SoC
   #
-!ifndef QEMU_TEST
   Silicon/Allwinner/H616Pkg/Drivers/SunxiMmcDxe/SunxiMmcDxe.inf
-!endif
   Platform/OrangePi/OrangePiZero2W/Drivers/FdtDxe/FdtDxe.inf
 
   #
