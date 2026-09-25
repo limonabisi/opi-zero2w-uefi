@@ -16,10 +16,14 @@ typedef struct {
 } OPI_MADT;
 #pragma pack ()
 
+//
+// GICR base is meaningless on GICv2 but is set to 1, exactly like the
+// Raspberry Pi 4 (GIC-400) tables that Windows on ARM is known to boot with.
+//
 #define GICC(n) \
   EFI_ACPI_6_3_GICC_STRUCTURE_INIT ( \
     n, n, GET_MPID (0, n), EFI_ACPI_6_0_GIC_ENABLED, H616_PMU_GSIV (n), \
-    H616_GICC_BASE, H616_GICV_BASE, H616_GICH_BASE, H616_GIC_MAINT_GSIV, 0, 0, 0)
+    H616_GICC_BASE, H616_GICV_BASE, H616_GICH_BASE, H616_GIC_MAINT_GSIV, 1, 0, 0)
 
 OPI_MADT  Madt = {
   {

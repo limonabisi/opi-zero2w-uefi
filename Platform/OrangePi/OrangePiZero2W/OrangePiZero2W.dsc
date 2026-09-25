@@ -383,7 +383,11 @@
   #
   MdeModulePkg/Universal/SerialDxe/SerialDxe.inf
   MdeModulePkg/Universal/Console/ConPlatformDxe/ConPlatformDxe.inf
-  MdeModulePkg/Universal/Console/ConSplitterDxe/ConSplitterDxe.inf
+  MdeModulePkg/Universal/Console/ConSplitterDxe/ConSplitterDxe.inf {
+    <PcdsFixedAtBuild>
+      # silence "Current toggle state is ..." on every Caps/Num Lock press
+      gEfiMdePkgTokenSpaceGuid.PcdDebugPrintErrorLevel|0x80000002
+  }
   MdeModulePkg/Universal/Console/TerminalDxe/TerminalDxe.inf
   MdeModulePkg/Universal/HiiDatabaseDxe/HiiDatabaseDxe.inf
   MdeModulePkg/Universal/DevicePathDxe/DevicePathDxe.inf
