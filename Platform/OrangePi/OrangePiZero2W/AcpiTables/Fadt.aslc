@@ -1,0 +1,73 @@
+/** @file
+  Fixed ACPI Description Table: HW-reduced ACPI, PSCI (SMC) for SMP/reset.
+
+  SPDX-License-Identifier: BSD-2-Clause-Patent
+**/
+
+#include <AcpiHelperMacros.h>
+#include "AcpiTables.h"
+
+EFI_ACPI_6_3_FIXED_ACPI_DESCRIPTION_TABLE  Fadt = {
+  ACPI_HEADER (
+    EFI_ACPI_6_3_FIXED_ACPI_DESCRIPTION_TABLE_SIGNATURE,
+    EFI_ACPI_6_3_FIXED_ACPI_DESCRIPTION_TABLE,
+    EFI_ACPI_6_3_FIXED_ACPI_DESCRIPTION_TABLE_REVISION
+    ),
+  0,                                          // FirmwareCtrl
+  0,                                          // Dsdt
+  EFI_ACPI_RESERVED_BYTE,                     // Reserved0
+  EFI_ACPI_6_3_PM_PROFILE_APPLIANCE_PC,       // PreferredPmProfile
+  0,                                          // SciInt
+  0,                                          // SmiCmd
+  0,                                          // AcpiEnable
+  0,                                          // AcpiDisable
+  0,                                          // S4BiosReq
+  0,                                          // PstateCnt
+  0,                                          // Pm1aEvtBlk
+  0,                                          // Pm1bEvtBlk
+  0,                                          // Pm1aCntBlk
+  0,                                          // Pm1bCntBlk
+  0,                                          // Pm2CntBlk
+  0,                                          // PmTmrBlk
+  0,                                          // Gpe0Blk
+  0,                                          // Gpe1Blk
+  0,                                          // Pm1EvtLen
+  0,                                          // Pm1CntLen
+  0,                                          // Pm2CntLen
+  0,                                          // PmTmrLen
+  0,                                          // Gpe0BlkLen
+  0,                                          // Gpe1BlkLen
+  0,                                          // Gpe1Base
+  0,                                          // CstCnt
+  0,                                          // PLvl2Lat
+  0,                                          // PLvl3Lat
+  0,                                          // FlushSize
+  0,                                          // FlushStride
+  0,                                          // DutyOffset
+  0,                                          // DutyWidth
+  0,                                          // DayAlrm
+  0,                                          // MonAlrm
+  0,                                          // Century
+  EFI_ACPI_RESERVED_WORD,                     // IaPcBootArch
+  EFI_ACPI_RESERVED_BYTE,                     // Reserved1
+  EFI_ACPI_6_3_WBINVD | EFI_ACPI_6_3_SLP_BUTTON | EFI_ACPI_6_3_HW_REDUCED_ACPI,   // Flags
+  ACPI_NULL_GAS,                              // ResetReg
+  0,                                          // ResetValue
+  EFI_ACPI_6_3_ARM_PSCI_COMPLIANT,            // ArmBootArchFlags (SMC conduit)
+  EFI_ACPI_6_3_FIXED_ACPI_DESCRIPTION_TABLE_MINOR_REVISION,
+  0,                                          // XFirmwareCtrl
+  0,                                          // XDsdt
+  ACPI_NULL_GAS,                              // XPm1aEvtBlk
+  ACPI_NULL_GAS,                              // XPm1bEvtBlk
+  ACPI_NULL_GAS,                              // XPm1aCntBlk
+  ACPI_NULL_GAS,                              // XPm1bCntBlk
+  ACPI_NULL_GAS,                              // XPm2CntBlk
+  ACPI_NULL_GAS,                              // XPmTmrBlk
+  ACPI_NULL_GAS,                              // XGpe0Blk
+  ACPI_NULL_GAS,                              // XGpe1Blk
+  ACPI_NULL_GAS,                              // SleepControlReg
+  ACPI_NULL_GAS,                              // SleepStatusReg
+  0                                           // HypervisorVendorIdentity
+};
+
+VOID *CONST  ReferenceAcpiTable = &Fadt;

@@ -1,0 +1,39 @@
+/** @file
+  SPCR: serial console on UART0. The baud rate field is 0 ("as configured")
+  because the UART runs from a 24 MHz clock, not the 1.8432 MHz a 16550
+  divisor calculation would assume; firmware already set 115200 8N1.
+
+  SPDX-License-Identifier: BSD-2-Clause-Patent
+**/
+
+#include <AcpiHelperMacros.h>
+#include <IndustryStandard/SerialPortConsoleRedirectionTable.h>
+#include "AcpiTables.h"
+
+EFI_ACPI_SERIAL_PORT_CONSOLE_REDIRECTION_TABLE  Spcr = {
+  ACPI_HEADER (
+    EFI_ACPI_6_3_SERIAL_PORT_CONSOLE_REDIRECTION_TABLE_SIGNATURE,
+    EFI_ACPI_SERIAL_PORT_CONSOLE_REDIRECTION_TABLE,
+    EFI_ACPI_SERIAL_PORT_CONSOLE_REDIRECTION_TABLE_REVISION
+    ),
+  EFI_ACPI_SERIAL_PORT_CONSOLE_REDIRECTION_TABLE_INTERFACE_TYPE_16550_WITH_GAS,
+  { EFI_ACPI_RESERVED_BYTE, EFI_ACPI_RESERVED_BYTE, EFI_ACPI_RESERVED_BYTE },
+  ACPI_GAS32 (H616_UART0_BASE),
+  EFI_ACPI_SERIAL_PORT_CONSOLE_REDIRECTION_TABLE_INTERRUPT_TYPE_GIC,
+  0,                                          // Irq (unused on ARM)
+  H616_UART0_GSIV,
+  0,                                          // BaudRate: as is
+  EFI_ACPI_SERIAL_PORT_CONSOLE_REDIRECTION_TABLE_PARITY_NO_PARITY,
+  EFI_ACPI_SERIAL_PORT_CONSOLE_REDIRECTION_TABLE_STOP_BITS_1,
+  0,                                          // FlowControl: none
+  EFI_ACPI_SERIAL_PORT_CONSOLE_REDIRECTION_TABLE_TERMINAL_TYPE_VT_UTF8,
+  EFI_ACPI_RESERVED_BYTE,
+  0xFFFF,                                     // PciDeviceId
+  0xFFFF,                                     // PciVendorId
+  0, 0, 0,                                    // PCI bus/device/function
+  0,                                          // PciFlags
+  0,                                          // PciSegment
+  EFI_ACPI_RESERVED_DWORD
+};
+
+VOID *CONST  ReferenceAcpiTable = &Spcr;

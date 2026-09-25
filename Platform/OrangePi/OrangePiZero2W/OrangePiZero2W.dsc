@@ -200,7 +200,7 @@
 
 [PcdsFixedAtBuild.common]
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"Orange Pi Zero 2W EDK2 port"
-  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.4.2-h618"
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.5.0-h618"
 
   gEfiMdePkgTokenSpaceGuid.PcdMaximumUnicodeStringLength|1000000
   gEfiMdePkgTokenSpaceGuid.PcdMaximumAsciiStringLength|1000000
@@ -432,6 +432,13 @@
   Ext4Pkg/Ext4Dxe/Ext4Dxe.inf
 
   #
+  # ACPI (for Windows on ARM; Linux keeps using the device tree)
+  #
+  MdeModulePkg/Universal/Acpi/AcpiTableDxe/AcpiTableDxe.inf
+  MdeModulePkg/Universal/Acpi/AcpiPlatformDxe/AcpiPlatformDxe.inf
+  Platform/OrangePi/OrangePiZero2W/AcpiTables/AcpiTables.inf
+
+  #
   # BDS
   #
   MdeModulePkg/Universal/BootManagerPolicyDxe/BootManagerPolicyDxe.inf
@@ -457,6 +464,7 @@
       NULL|ShellPkg/Library/UefiShellDriver1CommandsLib/UefiShellDriver1CommandsLib.inf
       NULL|ShellPkg/Library/UefiShellDebug1CommandsLib/UefiShellDebug1CommandsLib.inf
       NULL|ShellPkg/Library/UefiShellInstall1CommandsLib/UefiShellInstall1CommandsLib.inf
+      NULL|ShellPkg/Library/UefiShellAcpiViewCommandLib/UefiShellAcpiViewCommandLib.inf
       HandleParsingLib|ShellPkg/Library/UefiHandleParsingLib/UefiHandleParsingLib.inf
       OrderedCollectionLib|MdePkg/Library/BaseOrderedCollectionRedBlackTreeLib/BaseOrderedCollectionRedBlackTreeLib.inf
       PrintLib|MdePkg/Library/BasePrintLib/BasePrintLib.inf

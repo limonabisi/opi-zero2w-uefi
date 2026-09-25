@@ -1,0 +1,29 @@
+/** @file
+  GTDT: ARM generic timer PPIs (level, active high).
+
+  SPDX-License-Identifier: BSD-2-Clause-Patent
+**/
+
+#include <AcpiHelperMacros.h>
+#include "AcpiTables.h"
+
+#define GTIMER_FLAGS  0      // level triggered, active high, not always-on
+
+EFI_ACPI_6_3_GENERIC_TIMER_DESCRIPTION_TABLE  Gtdt = {
+  ACPI_HEADER (
+    EFI_ACPI_6_3_GENERIC_TIMER_DESCRIPTION_TABLE_SIGNATURE,
+    EFI_ACPI_6_3_GENERIC_TIMER_DESCRIPTION_TABLE,
+    EFI_ACPI_6_3_GENERIC_TIMER_DESCRIPTION_TABLE_REVISION
+    ),
+  0xFFFFFFFFFFFFFFFF,       // CntControlBasePhysicalAddress (no memory-mapped timer)
+  EFI_ACPI_RESERVED_DWORD,
+  H616_TIMER_SEC_GSIV,  GTIMER_FLAGS,
+  H616_TIMER_NS_GSIV,   GTIMER_FLAGS,
+  H616_TIMER_VIRT_GSIV, GTIMER_FLAGS,
+  H616_TIMER_HYP_GSIV,  GTIMER_FLAGS,
+  0xFFFFFFFFFFFFFFFF,       // CntReadBasePhysicalAddress
+  0,                        // PlatformTimerCount
+  0                         // PlatformTimerOffset
+};
+
+VOID *CONST  ReferenceAcpiTable = &Gtdt;

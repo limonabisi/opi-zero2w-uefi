@@ -553,7 +553,7 @@ OhciControlTransfer (
     }
     *DataLength = 0;
   } else {
-    DEBUG ((DEBUG_INFO, "Control transfer successed\r\n"));
+    DEBUG ((DEBUG_VERBOSE, "Control transfer successed\r\n"));
   }
 
 UNMAP_DATA_BUFF:

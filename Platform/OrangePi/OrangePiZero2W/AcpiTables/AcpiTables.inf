@@ -1,0 +1,28 @@
+## @file
+#  ACPI tables for the Orange Pi Zero 2W (for Windows on ARM; Linux keeps
+#  using the device tree).
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x0001001A
+  BASE_NAME                      = OpiAcpiTables
+  FILE_GUID                      = 7E374E25-8E01-4FEE-87F2-390C23C606CD
+  MODULE_TYPE                    = USER_DEFINED
+  VERSION_STRING                 = 1.0
+
+[Sources]
+  AcpiTables.h
+  Dsdt.asl
+  Fadt.aslc
+  Madt.aslc
+  Gtdt.aslc
+  Dbg2.aslc
+  Spcr.aslc
+
+[Packages]
+  ArmPkg/ArmPkg.dec
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  EmbeddedPkg/EmbeddedPkg.dec

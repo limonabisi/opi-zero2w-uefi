@@ -1,0 +1,38 @@
+/** @file
+  MADT: 4x Cortex-A53 on a GIC-400 (GICv2).
+
+  SPDX-License-Identifier: BSD-2-Clause-Patent
+**/
+
+#include <AcpiHelperMacros.h>
+#include <Library/ArmLib.h>
+#include "AcpiTables.h"
+
+#pragma pack (1)
+typedef struct {
+  EFI_ACPI_6_3_MULTIPLE_APIC_DESCRIPTION_TABLE_HEADER    Header;
+  EFI_ACPI_6_3_GIC_STRUCTURE                             Gicc[4];
+  EFI_ACPI_6_3_GIC_DISTRIBUTOR_STRUCTURE                 Gicd;
+} OPI_MADT;
+#pragma pack ()
+
+#define GICC(n) \
+  EFI_ACPI_6_3_GICC_STRUCTURE_INIT ( \
+    n, n, GET_MPID (0, n), EFI_ACPI_6_0_GIC_ENABLED, H616_PMU_GSIV (n), \
+    H616_GICC_BASE, H616_GICV_BASE, H616_GICH_BASE, H616_GIC_MAINT_GSIV, 0, 0, 0)
+
+OPI_MADT  Madt = {
+  {
+    ACPI_HEADER (
+      EFI_ACPI_6_3_MULTIPLE_APIC_DESCRIPTION_TABLE_SIGNATURE,
+      OPI_MADT,
+      EFI_ACPI_6_3_MULTIPLE_APIC_DESCRIPTION_TABLE_REVISION
+      ),
+    0,                                        // LocalApicAddress
+    0                                         // Flags
+  },
+  { GICC (0), GICC (1), GICC (2), GICC (3) },
+  EFI_ACPI_6_0_GIC_DISTRIBUTOR_INIT (0, H616_GICD_BASE, 0, EFI_ACPI_6_0_GIC_V2)
+};
+
+VOID *CONST  ReferenceAcpiTable = &Madt;
