@@ -1,0 +1,42 @@
+## @file
+#  Install the embedded board device tree as the EFI FDT config table.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = FdtDxe
+  FILE_GUID                      = dcd5f5fc-2af3-4349-b3f3-d9d6c4d3ce8a
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 0.1
+  ENTRY_POINT                    = FdtDxeInitialize
+
+[Sources]
+  FdtDxe.c
+
+[Packages]
+  ArmPkg/ArmPkg.dec
+  MdePkg/MdePkg.dec
+  Silicon/Allwinner/H616Pkg/H616Pkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  DxeServicesLib
+  FdtLib
+  MemoryAllocationLib
+  PcdLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Guids]
+  gFdtTableGuid
+
+[FixedPcd]
+  gArmTokenSpaceGuid.PcdSystemMemoryBase
+  gArmTokenSpaceGuid.PcdSystemMemorySize
+
+[Depex]
+  TRUE

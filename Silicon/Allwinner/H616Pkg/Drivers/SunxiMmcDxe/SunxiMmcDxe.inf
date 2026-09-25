@@ -1,0 +1,45 @@
+## @file
+#  Allwinner H616/H618 SD/MMC host controller driver (PIO).
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = SunxiMmcDxe
+  FILE_GUID                      = e8137fa8-4645-4da8-b6a0-f40e1c00839d
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 0.1
+  ENTRY_POINT                    = SunxiMmcDxeInitialize
+
+[Sources]
+  SunxiMmcDxe.c
+
+[Packages]
+  EmbeddedPkg/EmbeddedPkg.dec
+  MdePkg/MdePkg.dec
+  Silicon/Allwinner/H616Pkg/H616Pkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  DevicePathLib
+  IoLib
+  MemoryAllocationLib
+  PcdLib
+  TimerLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Protocols]
+  gEmbeddedMmcHostProtocolGuid     ## PRODUCES
+  gEfiDevicePathProtocolGuid       ## PRODUCES
+
+[FixedPcd]
+  gH616TokenSpaceGuid.PcdSunxiMmcBase
+  gH616TokenSpaceGuid.PcdSunxiMmcIndex
+  gH616TokenSpaceGuid.PcdSunxiMmcMaxClock
+
+[Depex]
+  TRUE

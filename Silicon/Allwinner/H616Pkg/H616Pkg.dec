@@ -1,0 +1,24 @@
+## @file
+#  Allwinner H616 / H618 silicon package.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  DEC_SPECIFICATION              = 0x0001001A
+  PACKAGE_NAME                   = H616Pkg
+  PACKAGE_GUID                   = 0d18347e-44a7-43ae-8ca6-862c36afd35a
+  PACKAGE_VERSION                = 0.1
+
+[Includes]
+  Include
+
+[Guids]
+  gH616TokenSpaceGuid = { 0x85318c69, 0xdf1e, 0x45c1, { 0x93, 0xd4, 0x9f, 0x96, 0x5e, 0xb9, 0x9e, 0x91 } }
+
+[PcdsFixedAtBuild]
+  # SD/MMC host controller used for the boot card (SMHC0 = microSD slot)
+  gH616TokenSpaceGuid.PcdSunxiMmcBase|0x04020000|UINT64|0x00000001
+  gH616TokenSpaceGuid.PcdSunxiMmcIndex|0|UINT32|0x00000002
+  # Upper limit for the SD card clock in Hz (PIO mode; 50 MHz = SD high speed)
+  gH616TokenSpaceGuid.PcdSunxiMmcMaxClock|50000000|UINT32|0x00000003

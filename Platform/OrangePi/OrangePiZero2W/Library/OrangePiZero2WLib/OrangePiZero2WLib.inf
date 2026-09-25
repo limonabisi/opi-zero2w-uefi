@@ -1,0 +1,40 @@
+## @file
+#  ArmPlatformLib for Orange Pi Zero 2W.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = OrangePiZero2WLib
+  FILE_GUID                      = 9c7d907a-50dc-44c8-8ea2-b160065e4c22
+  MODULE_TYPE                    = BASE
+  VERSION_STRING                 = 0.1
+  LIBRARY_CLASS                  = ArmPlatformLib
+
+[Packages]
+  ArmPkg/ArmPkg.dec
+  ArmPlatformPkg/ArmPlatformPkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  MdePkg/MdePkg.dec
+  Silicon/Allwinner/H616Pkg/H616Pkg.dec
+
+[LibraryClasses]
+  ArmLib
+  BaseMemoryLib
+  DebugLib
+  PcdLib
+  SerialPortLib
+
+[Sources.common]
+  OrangePiZero2W.c
+
+[Sources.AArch64]
+  AArch64/ArmPlatformHelper.S
+
+[FixedPcd]
+  gArmTokenSpaceGuid.PcdSystemMemoryBase
+  gArmTokenSpaceGuid.PcdSystemMemorySize
+
+[Ppis]
+  gArmMpCoreInfoPpiGuid
