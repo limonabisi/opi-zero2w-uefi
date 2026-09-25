@@ -162,6 +162,7 @@ READ_LOCK_STATUS   = TRUE
   INF MdeModulePkg/Universal/Disk/PartitionDxe/PartitionDxe.inf
   INF MdeModulePkg/Universal/Disk/UnicodeCollation/EnglishDxe/EnglishDxe.inf
   INF FatPkg/EnhancedFatDxe/Fat.inf
+  INF Ext4Pkg/Ext4Dxe/Ext4Dxe.inf
 
   INF MdeModulePkg/Universal/BootManagerPolicyDxe/BootManagerPolicyDxe.inf
   INF MdeModulePkg/Universal/DisplayEngineDxe/DisplayEngineDxe.inf

@@ -26,6 +26,7 @@ if [ ! -d "$SRC/edk2" ]; then
   git clone --depth 1 --branch $EDK2_TAG https://github.com/tianocore/edk2.git "$SRC/edk2"
   git -C "$SRC/edk2" submodule update --init --depth 1
 fi
+[ -d "$SRC/edk2-platforms" ] || git clone --depth 1 https://github.com/tianocore/edk2-platforms.git "$SRC/edk2-platforms"   # Ext4Pkg
 make -C "$SRC/edk2/BaseTools" -j"$J"
 
 echo "==> TF-A yamalari"

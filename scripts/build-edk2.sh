@@ -6,7 +6,7 @@ TOP="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${SRC:-$TOP/src}"
 TARGET="${1:-DEBUG}"
 export WORKSPACE="$TOP/build/edk2-ws"
-export PACKAGES_PATH="$SRC/edk2:$TOP"
+export PACKAGES_PATH="$SRC/edk2:$SRC/edk2-platforms/Features:$TOP"
 export GCC_AARCH64_PREFIX="${GCC_AARCH64_PREFIX:-aarch64-linux-gnu-}"
 mkdir -p "$WORKSPACE"
 # Platform fixes to EDK2 core (idempotent)
