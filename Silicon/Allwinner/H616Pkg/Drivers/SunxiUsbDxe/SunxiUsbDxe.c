@@ -19,6 +19,10 @@
   through a USB 2.0 hub (the hub's transaction translator lets EHCI talk to
   it).
 
+  The bring-up is checked with a short self test (a connected hub must not
+  sit in a K line state and a root port reset must complete) and redone up
+  to four times: on some boots the PHY otherwise came up stuck.
+
   SPDX-License-Identifier: BSD-2-Clause-Patent
 **/
 
@@ -47,24 +51,190 @@ STATIC CONST UINTN  mEhciBase[4] = { 0x05101000, 0x05200000, 0x05310000, 0x05311
 #define   PMU_HCI_PHY_CTL    0x10
 #define   PMU_PHY_CTL_SIDDQ  BIT3
 
+
 #define USB_PORT             1
 
+//
+// EHCI operational registers (CAPLENGTH is 0x10 on sunxi)
+//
+#define EHCI_OP(n)           (mEhciBase[n] + 0x10)
+#define   EHCI_USBCMD        0x00
+#define     USBCMD_RUN       BIT0
+#define     USBCMD_HCRESET   BIT1
+#define   EHCI_USBSTS        0x04
+#define     USBSTS_HALTED    BIT12
+#define   EHCI_CONFIGFLAG    0x40
+#define   EHCI_PORTSC        0x44
+#define     PORTSC_CCS       BIT0
+#define     PORTSC_CSC       BIT1
+#define     PORTSC_PE        BIT2
+#define     PORTSC_PEC       BIT3
+#define     PORTSC_OCC       BIT5
+#define     PORTSC_PR        BIT8
+#define     PORTSC_LS_MASK   (BIT11 | BIT10)
+#define     PORTSC_LS_K      BIT10
+#define     PORTSC_PP        BIT12
+#define     PORTSC_CHANGE    (PORTSC_CSC | PORTSC_PEC | PORTSC_OCC)
+
+#define MAX_BRINGUP_TRIES    4
+
+/**
+  Put one USB PHY and its EHCI/OHCI pair into reset with all clocks gated.
+**/
+STATIC
+VOID
+UsbPortShutdown (
+  IN UINTN  Port
+  )
+{
+  MmioAnd32 (CCU_USB_BGR, ~(UINT32)(BGR_RST_OHCI (Port) | BGR_RST_EHCI (Port)));
+  MicroSecondDelay (10);
+  MmioAnd32 (CCU_USB_BGR, ~(UINT32)(BGR_OHCI (Port) | BGR_EHCI (Port)));
+  MmioAnd32 (CCU_USB_CLK (Port), ~(UINT32)USB_RST_PHY);
+  MicroSecondDelay (10);
+  MmioAnd32 (CCU_USB_CLK (Port), ~(UINT32)(USB_CLK_PHY | USB_CLK_OHCI_12M));
+  MicroSecondDelay (100);
+}
+
+/**
+  Bring a USB PHY and its EHCI/OHCI pair out of reset.  Clocks are always
+  started before the matching reset is released (as Linux does); releasing
+  both in the same register write can leave the PHY in a bad state.
+**/
 STATIC
 VOID
 UsbPhyPowerUp (
   IN UINTN  Port
   )
 {
-  // PHY clock + de-assert PHY reset (+ OHCI 12 MHz clock)
-  MmioOr32 (CCU_USB_CLK (Port), USB_CLK_PHY | USB_RST_PHY | USB_CLK_OHCI_12M);
-  MicroSecondDelay (10);
+  // PHY clock (+ OHCI 12 MHz clock) first, then release the PHY reset
+  MmioOr32 (CCU_USB_CLK (Port), USB_CLK_PHY | USB_CLK_OHCI_12M);
+  MicroSecondDelay (20);
+  MmioOr32 (CCU_USB_CLK (Port), USB_RST_PHY);
+  MicroSecondDelay (100);
 
-  // Controller bus clocks + de-assert controller resets
-  MmioOr32 (
-    CCU_USB_BGR,
-    BGR_OHCI (Port) | BGR_EHCI (Port) | BGR_RST_OHCI (Port) | BGR_RST_EHCI (Port)
-    );
-  MicroSecondDelay (10);
+  // Controller bus clocks first, then release the controller resets
+  MmioOr32 (CCU_USB_BGR, BGR_OHCI (Port) | BGR_EHCI (Port));
+  MicroSecondDelay (20);
+  MmioOr32 (CCU_USB_BGR, BGR_RST_OHCI (Port) | BGR_RST_EHCI (Port));
+  MicroSecondDelay (100);
+}
+
+STATIC
+VOID
+UsbBringUp (
+  VOID
+  )
+{
+  UsbPortShutdown (USB_PORT);
+  UsbPortShutdown (2);
+
+  // H616 quirk: PHY2 must be out of SIDDQ for PHY1/PHY3 to work.
+  UsbPhyPowerUp (2);
+  MmioAnd32 (PMU_BASE (2) + PMU_HCI_PHY_CTL, ~(UINT32)PMU_PHY_CTL_SIDDQ);
+
+  UsbPhyPowerUp (USB_PORT);
+  MmioAnd32 (PMU_BASE (USB_PORT) + PMU_HCI_PHY_CTL, ~(UINT32)PMU_PHY_CTL_SIDDQ);
+  MmioOr32 (PMU_BASE (USB_PORT), PMU_PASSBY_BITS);
+  MicroSecondDelay (1000);
+}
+
+STATIC
+VOID
+EhciHcReset (
+  IN UINTN  Op
+  )
+{
+  UINTN  Index;
+
+  MmioAnd32 (Op + EHCI_USBCMD, ~(UINT32)USBCMD_RUN);
+  for (Index = 0; Index < 100 && !(MmioRead32 (Op + EHCI_USBSTS) & USBSTS_HALTED); Index++) {
+    MicroSecondDelay (100);
+  }
+
+  MmioWrite32 (Op + EHCI_USBCMD, USBCMD_HCRESET);
+  for (Index = 0; Index < 100 && (MmioRead32 (Op + EHCI_USBCMD) & USBCMD_HCRESET); Index++) {
+    MicroSecondDelay (100);
+  }
+}
+
+/**
+  Run the EHCI briefly and do one root port reset, to check that the PHY
+  came up sane: a connected hub must not show a stuck K line state and the
+  port reset must complete.  The controller is halted and reset afterwards
+  so that EhciDxe starts from a clean state.
+
+  @retval TRUE   Port looks healthy (or nothing is connected).
+  @retval FALSE  PHY/port is stuck; the caller should redo the bring-up.
+**/
+STATIC
+BOOLEAN
+UsbPortSelfTest (
+  IN UINTN  Try
+  )
+{
+  UINTN    Op;
+  UINT32   Sc;
+  UINT32   ScReset;
+  UINTN    Index;
+  BOOLEAN  Ok;
+
+  Op      = EHCI_OP (USB_PORT);
+  Ok      = TRUE;
+  ScReset = 0;
+
+  EhciHcReset (Op);
+
+  // Run with the port routed to EHCI and powered
+  MmioWrite32 (Op + EHCI_USBCMD, USBCMD_RUN);
+  MmioWrite32 (Op + EHCI_CONFIGFLAG, 1);
+  Sc = MmioRead32 (Op + EHCI_PORTSC);
+  MmioWrite32 (Op + EHCI_PORTSC, (Sc & ~PORTSC_CHANGE) | PORTSC_PP);
+
+  // Give a hub up to 300 ms to connect and settle (USB debounce = 100 ms)
+  for (Index = 0; Index < 30; Index++) {
+    MicroSecondDelay (10000);
+    Sc = MmioRead32 (Op + EHCI_PORTSC);
+    if ((Index >= 10) && (Sc & PORTSC_CCS) && ((Sc & PORTSC_LS_MASK) != PORTSC_LS_K)) {
+      break;
+    }
+  }
+
+  if (Sc & PORTSC_CCS) {
+    if ((Sc & PORTSC_LS_MASK) == PORTSC_LS_K) {
+      // Hubs and HS/FS devices never idle in K: the PHY did not come up
+      Ok = FALSE;
+    } else {
+      // 50 ms bus reset; the controller must finish it on its own
+      MmioWrite32 (Op + EHCI_PORTSC, (Sc & ~(PORTSC_CHANGE | PORTSC_PE)) | PORTSC_PR);
+      MicroSecondDelay (50000);
+      MmioAnd32 (Op + EHCI_PORTSC, ~(UINT32)(PORTSC_CHANGE | PORTSC_PR));
+      for (Index = 0; Index < 100; Index++) {
+        MicroSecondDelay (1000);
+        ScReset = MmioRead32 (Op + EHCI_PORTSC);
+        if (!(ScReset & PORTSC_PR)) {
+          break;
+        }
+      }
+
+      if (ScReset & PORTSC_PR) {
+        Ok = FALSE;
+      }
+    }
+  }
+
+  DEBUG ((
+    Ok ? DEBUG_INFO : DEBUG_WARN,
+    "SunxiUsb: bring-up %u: PORTSC=0x%08x%a, after reset 0x%08x -> %a\n",
+    (UINT32)Try,
+    Sc,
+    (Sc & PORTSC_CCS) ? " (device)" : " (empty)",
+    ScReset,
+    Ok ? "ok" : "PHY stuck, retrying"
+    ));
+
+  EhciHcReset (Op);
+  return Ok;
 }
 
 EFI_STATUS
@@ -75,15 +245,14 @@ SunxiUsbDxeInitialize (
   )
 {
   EFI_STATUS  Status;
+  UINTN       Try;
 
-  // H616 quirk: PHY2 must be out of SIDDQ for PHY1/PHY3 to work.
-  UsbPhyPowerUp (2);
-  MmioAnd32 (PMU_BASE (2) + PMU_HCI_PHY_CTL, ~(UINT32)PMU_PHY_CTL_SIDDQ);
-
-  UsbPhyPowerUp (USB_PORT);
-  MmioAnd32 (PMU_BASE (USB_PORT) + PMU_HCI_PHY_CTL, ~(UINT32)PMU_PHY_CTL_SIDDQ);
-  MmioOr32 (PMU_BASE (USB_PORT), PMU_PASSBY_BITS);
-  MicroSecondDelay (100);
+  for (Try = 1; Try <= MAX_BRINGUP_TRIES; Try++) {
+    UsbBringUp ();
+    if (UsbPortSelfTest (Try)) {
+      break;
+    }
+  }
 
   DEBUG ((
     DEBUG_INFO,
