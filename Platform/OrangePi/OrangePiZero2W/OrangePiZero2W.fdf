@@ -65,11 +65,25 @@ READ_LOCK_STATUS   = TRUE
   INF MdeModulePkg/Universal/HiiDatabaseDxe/HiiDatabaseDxe.inf
   INF MdeModulePkg/Universal/DevicePathDxe/DevicePathDxe.inf
 
+!ifndef QEMU_TEST
   INF Silicon/Allwinner/H616Pkg/Drivers/SunxiMmcDxe/SunxiMmcDxe.inf
+!endif
   INF Platform/OrangePi/OrangePiZero2W/Drivers/FdtDxe/FdtDxe.inf
+  INF MdeModulePkg/Universal/SmbiosDxe/SmbiosDxe.inf
+  INF Platform/OrangePi/OrangePiZero2W/Drivers/PlatformSmbiosDxe/PlatformSmbiosDxe.inf
   FILE FREEFORM = 65f00053-da6b-4367-8ccf-13949db64027 {
     SECTION RAW = Platform/OrangePi/OrangePiZero2W/DeviceTree/sun50i-h618-orangepi-zero2w.dtb
   }
+
+!ifndef QEMU_TEST
+  INF Silicon/Allwinner/H616Pkg/Drivers/SunxiUsbDxe/SunxiUsbDxe.inf
+!endif
+  INF MdeModulePkg/Bus/Pci/NonDiscoverablePciDeviceDxe/NonDiscoverablePciDeviceDxe.inf
+  INF MdeModulePkg/Bus/Pci/EhciDxe/EhciDxe.inf
+  INF MdeModulePkg/Bus/Usb/UsbBusDxe/UsbBusDxe.inf
+  INF MdeModulePkg/Bus/Usb/UsbKbDxe/UsbKbDxe.inf
+  INF MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassStorageDxe.inf
+  INF MdeModulePkg/Bus/Usb/UsbMouseAbsolutePointerDxe/UsbMouseAbsolutePointerDxe.inf
 
   INF EmbeddedPkg/Universal/MmcDxe/MmcDxe.inf
   INF MdeModulePkg/Universal/Disk/DiskIoDxe/DiskIoDxe.inf

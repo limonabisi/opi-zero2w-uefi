@@ -80,6 +80,9 @@
   PeCoffExtraActionLib|ArmPkg/Library/DebugPeCoffExtraActionLib/DebugPeCoffExtraActionLib.inf
   UefiDecompressLib|MdePkg/Library/BaseUefiDecompressLib/BaseUefiDecompressLib.inf
   FdtLib|MdePkg/Library/BaseFdtLib/BaseFdtLib.inf
+  NonDiscoverableDeviceRegistrationLib|MdeModulePkg/Library/NonDiscoverableDeviceRegistrationLib/NonDiscoverableDeviceRegistrationLib.inf
+  DmaLib|EmbeddedPkg/Library/NonCoherentDmaLib/NonCoherentDmaLib.inf
+  UefiUsbLib|MdePkg/Library/UefiUsbLib/UefiUsbLib.inf
 
   # Console: Allwinner UART0 is a DesignWare 16550 (reg-shift 2, 32-bit access)
   SerialPortLib|Silicon/Allwinner/H616Pkg/Library/SunxiSerialPortLib/SunxiSerialPortLib.inf
@@ -191,7 +194,7 @@
 
 [PcdsFixedAtBuild.common]
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"Orange Pi Zero 2W EDK2 port"
-  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.1-h618"
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.3-h618"
 
   gEfiMdePkgTokenSpaceGuid.PcdMaximumUnicodeStringLength|1000000
   gEfiMdePkgTokenSpaceGuid.PcdMaximumAsciiStringLength|1000000
@@ -256,8 +259,12 @@
   gH616TokenSpaceGuid.PcdSunxiMmcIndex|0
   gH616TokenSpaceGuid.PcdSunxiMmcMaxClock|50000000
 
-  # Boot: shell is always a boot option (runs startup.nsh from the SD card)
-  gArmTokenSpaceGuid.PcdUefiShellDefaultBootEnable|TRUE
+  # Boot order: SD card (EFI/BOOT/BOOTAA64.EFI) -> if nothing boots, the
+  # Boot Manager / setup menu (UiApp). The UEFI Shell stays available from
+  # the menu but is not booted automatically. ESC/F2 = setup, ENTER = continue.
+  gArmTokenSpaceGuid.PcdUefiShellDefaultBootEnable|FALSE
+  gEfiMdeModulePkgTokenSpaceGuid.PcdSmbiosVersion|0x0307
+  gEfiMdeModulePkgTokenSpaceGuid.PcdSmbiosDocRev|0x0
   gEfiShellPkgTokenSpaceGuid.PcdShellLibAutoInitialize|FALSE
   gEfiShellPkgTokenSpaceGuid.PcdShellDefaultDelay|1
   gEfiMdeModulePkgTokenSpaceGuid.PcdResetOnMemoryTypeInformationChange|FALSE
@@ -293,7 +300,7 @@
 
 [PcdsDynamicDefault.common]
   # No keyboard input possible on this setup -> short timeout, then autoboot
-  gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut|2
+  gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut|3
   gEfiMdeModulePkgTokenSpaceGuid.PcdBootDiscoveryPolicy|2
 
 ################################################################################
@@ -350,8 +357,25 @@
   #
   # Board / SoC
   #
+!ifndef QEMU_TEST
   Silicon/Allwinner/H616Pkg/Drivers/SunxiMmcDxe/SunxiMmcDxe.inf
+!endif
   Platform/OrangePi/OrangePiZero2W/Drivers/FdtDxe/FdtDxe.inf
+  MdeModulePkg/Universal/SmbiosDxe/SmbiosDxe.inf
+  Platform/OrangePi/OrangePiZero2W/Drivers/PlatformSmbiosDxe/PlatformSmbiosDxe.inf
+
+  #
+  # USB host (EHCI1 = second USB-C port) + keyboard / mass storage
+  #
+!ifndef QEMU_TEST
+  Silicon/Allwinner/H616Pkg/Drivers/SunxiUsbDxe/SunxiUsbDxe.inf
+!endif
+  MdeModulePkg/Bus/Pci/NonDiscoverablePciDeviceDxe/NonDiscoverablePciDeviceDxe.inf
+  MdeModulePkg/Bus/Pci/EhciDxe/EhciDxe.inf
+  MdeModulePkg/Bus/Usb/UsbBusDxe/UsbBusDxe.inf
+  MdeModulePkg/Bus/Usb/UsbKbDxe/UsbKbDxe.inf
+  MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassStorageDxe.inf
+  MdeModulePkg/Bus/Usb/UsbMouseAbsolutePointerDxe/UsbMouseAbsolutePointerDxe.inf
 
   #
   # Storage + filesystems

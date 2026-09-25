@@ -1,0 +1,31 @@
+## @file
+#  Allwinner H616/H618 USB host (EHCI1) bring-up.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = SunxiUsbDxe
+  FILE_GUID                      = a688c6e7-8364-4d13-881f-a106e4e51040
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 0.1
+  ENTRY_POINT                    = SunxiUsbDxeInitialize
+
+[Sources]
+  SunxiUsbDxe.c
+
+[Packages]
+  MdeModulePkg/MdeModulePkg.dec
+  MdePkg/MdePkg.dec
+  Silicon/Allwinner/H616Pkg/H616Pkg.dec
+
+[LibraryClasses]
+  DebugLib
+  IoLib
+  NonDiscoverableDeviceRegistrationLib
+  TimerLib
+  UefiDriverEntryPoint
+
+[Depex]
+  TRUE
