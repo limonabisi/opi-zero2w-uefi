@@ -63,7 +63,9 @@ cat > "$WORK/edk2.its" <<ITS
     };
 };
 ITS
-( cd "$WORK" && mkimage -f edk2.its edk2.itb >/dev/null )
+# -E: image data outside the FDT header, so SPL only reads the small header
+# into its 1 MiB malloc area and copies each image straight to its load address.
+( cd "$WORK" && mkimage -E -B 0x200 -f edk2.its edk2.itb >/dev/null )
 
 # SPL (eGON header, 40 KiB) immediately followed by the FIT, exactly like u-boot-sunxi-with-spl.bin
 BOOT="$OUT/opi-zero2w-edk2-boot.bin"
