@@ -1,0 +1,209 @@
+diff --git a/MdeModulePkg/Bus/Usb/UsbBusDxe/UsbEnumer.c b/MdeModulePkg/Bus/Usb/UsbBusDxe/UsbEnumer.c
+index 64da8d7..8a72012 100644
+--- a/MdeModulePkg/Bus/Usb/UsbBusDxe/UsbEnumer.c
++++ b/MdeModulePkg/Bus/Usb/UsbBusDxe/UsbEnumer.c
+@@ -1140,6 +1140,9 @@ UsbHubEnumeration (
+   @param  Context               The context to the event.
+ 
+ **/
++STATIC UINT8  mRootIdle[8];
++STATIC UINT8  mRootRetry[8];
++
+ VOID
+ EFIAPI
+ UsbRootHubEnumeration (
+@@ -1147,9 +1150,10 @@ UsbRootHubEnumeration (
+   IN VOID       *Context
+   )
+ {
+-  USB_INTERFACE  *RootHub;
+-  UINT8          Index;
+-  USB_DEVICE     *Child;
++  USB_INTERFACE        *RootHub;
++  UINT8                Index;
++  USB_DEVICE           *Child;
++  EFI_USB_PORT_STATUS  PortState;
+ 
+   RootHub = (USB_INTERFACE *)Context;
+ 
+@@ -1161,5 +1165,32 @@ UsbRootHubEnumeration (
+     }
+ 
+     UsbEnumeratePort (RootHub, Index);
++
++    //
++    // OPi Zero 2W: if a device is connected but its enumeration failed
++    // (e.g. the root port reset timed out), no further change event will
++    // ever arrive.  Retry it a few times, once per second.
++    //
++    if (Index < ARRAY_SIZE (mRootRetry)) {
++      Child = UsbFindChild (RootHub, Index);
++      ZeroMem (&PortState, sizeof (PortState));
++      if (  (Child == NULL)
++         && !EFI_ERROR (RootHub->HubApi->GetPortStatus (RootHub, Index, &PortState))
++         && USB_BIT_IS_SET (PortState.PortStatus, USB_PORT_STAT_CONNECTION)
++         && !USB_BIT_IS_SET (PortState.PortStatus, USB_PORT_STAT_OWNER))
++      {
++        if ((mRootRetry[Index] < 5) && (++mRootIdle[Index] >= 10)) {
++          mRootIdle[Index] = 0;
++          mRootRetry[Index]++;
++          DEBUG ((DEBUG_WARN, "UsbRootHubEnumeration: port %d connected but not enumerated, retry %d\n", Index, mRootRetry[Index]));
++          UsbEnumerateNewDev (RootHub, Index, TRUE);
++        }
++      } else if (!USB_BIT_IS_SET (PortState.PortStatus, USB_PORT_STAT_CONNECTION)) {
++        mRootIdle[Index]  = 0;
++        mRootRetry[Index] = 0;
++      } else {
++        mRootIdle[Index] = 0;
++      }
++    }
+   }
+ }
+diff --git a/MdeModulePkg/Bus/Usb/UsbBusDxe/UsbHub.c b/MdeModulePkg/Bus/Usb/UsbBusDxe/UsbHub.c
+index 5503230..17a0321 100644
+--- a/MdeModulePkg/Bus/Usb/UsbBusDxe/UsbHub.c
++++ b/MdeModulePkg/Bus/Usb/UsbBusDxe/UsbHub.c
+@@ -1145,6 +1145,7 @@ UsbRootHubResetPort (
+   EFI_STATUS           Status;
+   EFI_USB_PORT_STATUS  PortState;
+   UINTN                Index;
++  UINTN                Attempt;
+ 
+   //
+   // Notice: although EHCI requires that ENABLED bit be cleared
+@@ -1153,64 +1154,95 @@ UsbRootHubResetPort (
+   //
+   Bus = RootIf->Device->Bus;
+ 
+-  Status = UsbHcSetRootHubPortFeature (Bus, Port, EfiUsbPortReset);
+-
+-  if (EFI_ERROR (Status)) {
+-    DEBUG ((DEBUG_ERROR, "UsbRootHubResetPort: failed to start reset on port %d\n", Port));
+-    return Status;
+-  }
+-
+   //
+-  // Drive the reset signal for at least 50ms. Check USB 2.0 Spec
+-  // section 7.1.7.5 for timing requirements.
++  // OPi Zero 2W / H616: the EHCI line state can read K for a while right
++  // after a hub powers up.  Resetting then never completes, so give the
++  // line up to 1 s to settle to J/SE0 first.
+   //
+-  gBS->Stall (USB_SET_ROOT_PORT_RESET_STALL);
+-
+-  for (Index = 0; Index < Bus->MaxDevices; Index++) {
+-    if (  (Bus->Devices[Index] != NULL)
+-       && (Bus->Devices[Index]->ParentPort == Port)
+-       && (Bus->Devices[Index]->ParentIf == RootIf))
+-    {
+-      if (  (Bus->Usb2Hc != NULL)
+-         && (Bus->Usb2Hc->MajorRevision >= 0x3)
+-         && (Bus->Devices[Index]->IsSSDev)
+-         && (Bus->Devices[Index]->Speed < EFI_USB_SPEED_SUPER)
+-         && (Bus->Devices[Index]->DevDesc->Desc.DeviceClass != USB_HUB_CLASS_CODE))
+-      {
+-        DEBUG ((DEBUG_INFO, "Found the device matched, Index = %d, Port = %X, ParentIf = %X\n", Index, Port, RootIf));
+-        DEBUG ((DEBUG_INFO, "This is a USB 3 device and it need a longer waiting time for super speed.\n"));
+-        gBS->Stall (USB_WAIT_PORT_STABLE_STALL);
++  if (RootIf->MaxSpeed == EFI_USB_SPEED_HIGH) {
++    for (Index = 0; Index < 20; Index++) {
++      ZeroMem (&PortState, sizeof (EFI_USB_PORT_STATUS));
++      Status = UsbHcGetRootHubPortStatus (Bus, Port, &PortState);
++      if (EFI_ERROR (Status) || !USB_BIT_IS_SET (PortState.PortStatus, USB_PORT_STAT_LOW_SPEED)) {
++        break;
+       }
++
++      gBS->Stall (50 * USB_BUS_1_MILLISECOND);
++    }
++
++    if (Index != 0) {
++      DEBUG ((DEBUG_WARN, "UsbRootHubResetPort: port %d line K for %d ms before reset\n", Port, (UINT32)Index * 50));
+     }
+   }
+ 
+-  Status = UsbHcClearRootHubPortFeature (Bus, Port, EfiUsbPortReset);
++  for (Attempt = 0; Attempt < 3; Attempt++) {
++    Status = UsbHcSetRootHubPortFeature (Bus, Port, EfiUsbPortReset);
+ 
+-  if (EFI_ERROR (Status)) {
+-    DEBUG ((DEBUG_ERROR, "UsbRootHubResetPort: failed to clear reset on port %d\n", Port));
+-    return Status;
+-  }
++    if (EFI_ERROR (Status)) {
++      DEBUG ((DEBUG_ERROR, "UsbRootHubResetPort: failed to start reset on port %d\n", Port));
++      return Status;
++    }
+ 
+-  gBS->Stall (USB_CLR_ROOT_PORT_RESET_STALL);
++    //
++    // Drive the reset signal for at least 50ms. Check USB 2.0 Spec
++    // section 7.1.7.5 for timing requirements.
++    //
++    gBS->Stall (USB_SET_ROOT_PORT_RESET_STALL);
+ 
+-  //
+-  // USB host controller won't clear the RESET bit until
+-  // reset is actually finished.
+-  //
+-  ZeroMem (&PortState, sizeof (EFI_USB_PORT_STATUS));
++    for (Index = 0; Index < Bus->MaxDevices; Index++) {
++      if (  (Bus->Devices[Index] != NULL)
++         && (Bus->Devices[Index]->ParentPort == Port)
++         && (Bus->Devices[Index]->ParentIf == RootIf))
++      {
++        if (  (Bus->Usb2Hc != NULL)
++           && (Bus->Usb2Hc->MajorRevision >= 0x3)
++           && (Bus->Devices[Index]->IsSSDev)
++           && (Bus->Devices[Index]->Speed < EFI_USB_SPEED_SUPER)
++           && (Bus->Devices[Index]->DevDesc->Desc.DeviceClass != USB_HUB_CLASS_CODE))
++        {
++          DEBUG ((DEBUG_INFO, "Found the device matched, Index = %d, Port = %X, ParentIf = %X\n", Index, Port, RootIf));
++          DEBUG ((DEBUG_INFO, "This is a USB 3 device and it need a longer waiting time for super speed.\n"));
++          gBS->Stall (USB_WAIT_PORT_STABLE_STALL);
++        }
++      }
++    }
+ 
+-  for (Index = 0; Index < USB_WAIT_PORT_STS_CHANGE_LOOP; Index++) {
+-    Status = UsbHcGetRootHubPortStatus (Bus, Port, &PortState);
++    Status = UsbHcClearRootHubPortFeature (Bus, Port, EfiUsbPortReset);
+ 
+     if (EFI_ERROR (Status)) {
++      DEBUG ((DEBUG_ERROR, "UsbRootHubResetPort: failed to clear reset on port %d\n", Port));
+       return Status;
+     }
+ 
+-    if (!USB_BIT_IS_SET (PortState.PortStatus, USB_PORT_STAT_RESET)) {
++    gBS->Stall (USB_CLR_ROOT_PORT_RESET_STALL);
++
++    //
++    // USB host controller won't clear the RESET bit until
++    // reset is actually finished.
++    //
++    ZeroMem (&PortState, sizeof (EFI_USB_PORT_STATUS));
++
++    for (Index = 0; Index < USB_WAIT_PORT_STS_CHANGE_LOOP; Index++) {
++      Status = UsbHcGetRootHubPortStatus (Bus, Port, &PortState);
++
++      if (EFI_ERROR (Status)) {
++        return Status;
++      }
++
++      if (!USB_BIT_IS_SET (PortState.PortStatus, USB_PORT_STAT_RESET)) {
++        break;
++      }
++
++      gBS->Stall (USB_WAIT_PORT_STS_CHANGE_STALL);
++    }
++
++    if (Index != USB_WAIT_PORT_STS_CHANGE_LOOP) {
+       break;
+     }
+ 
+-    gBS->Stall (USB_WAIT_PORT_STS_CHANGE_STALL);
++    DEBUG ((DEBUG_WARN, "UsbRootHubResetPort: reset stuck on port %d (attempt %d), retrying\n", Port, Attempt + 1));
++    UsbHcClearRootHubPortFeature (Bus, Port, EfiUsbPortReset);
++    gBS->Stall (100 * USB_BUS_1_MILLISECOND);
+   }
+ 
+   if (Index == USB_WAIT_PORT_STS_CHANGE_LOOP) {

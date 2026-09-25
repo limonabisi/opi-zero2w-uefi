@@ -9,6 +9,13 @@ export WORKSPACE="$TOP/build/edk2-ws"
 export PACKAGES_PATH="$SRC/edk2:$TOP"
 export GCC_AARCH64_PREFIX="${GCC_AARCH64_PREFIX:-aarch64-linux-gnu-}"
 mkdir -p "$WORKSPACE"
+# Platform fixes to EDK2 core (idempotent)
+for p in "$TOP"/patches/edk2-*.patch; do
+  [ -e "$p" ] || continue
+  if git -C "$SRC/edk2" apply --check "$p" 2>/dev/null; then
+    git -C "$SRC/edk2" apply "$p" && echo "edk2 patch applied: $(basename "$p")"
+  fi
+done
 # edksetup.sh references unset variables, so relax -u while sourcing it
 set +u
 source "$SRC/edk2/edksetup.sh" BaseTools >/dev/null
