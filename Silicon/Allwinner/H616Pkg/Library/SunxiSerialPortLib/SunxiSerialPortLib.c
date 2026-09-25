@@ -74,7 +74,7 @@ SerialPortRead (
 {
   UINTN  Index;
 
-  if (Buffer == NULL) {
+  if ((Buffer == NULL) || !FeaturePcdGet (PcdSunxiUartInputEnable)) {
     return 0;
   }
 
@@ -94,6 +94,10 @@ SerialPortPoll (
   VOID
   )
 {
+  if (!FeaturePcdGet (PcdSunxiUartInputEnable)) {
+    return FALSE;
+  }
+
   return (MmioRead32 (UART_BASE + UART_LSR) & LSR_DR) != 0;
 }
 
@@ -116,7 +120,7 @@ SerialPortGetControl (
 
   Lsr      = MmioRead32 (UART_BASE + UART_LSR);
   *Control = EFI_SERIAL_CLEAR_TO_SEND | EFI_SERIAL_DATA_SET_READY | EFI_SERIAL_CARRIER_DETECT;
-  if ((Lsr & LSR_DR) == 0) {
+  if (((Lsr & LSR_DR) == 0) || !FeaturePcdGet (PcdSunxiUartInputEnable)) {
     *Control |= EFI_SERIAL_INPUT_BUFFER_EMPTY;
   }
 

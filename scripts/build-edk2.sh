@@ -13,7 +13,7 @@ mkdir -p "$WORKSPACE"
 set +u
 source "$SRC/edk2/edksetup.sh" BaseTools >/dev/null
 set -u
-build -a AARCH64 -t GCC -b "$TARGET" -n "$(nproc)" \
+build -a AARCH64 -t GCC -b "$TARGET" -n "$(nproc)" ${EDK2_EXTRA_FLAGS:-} \
       -p Platform/OrangePi/OrangePiZero2W/OrangePiZero2W.dsc
 FD="$WORKSPACE/Build/OrangePiZero2W/${TARGET}_GCC/FV/OPIZERO2W_EFI.fd"
 ls -la "$FD"

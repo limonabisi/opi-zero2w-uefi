@@ -11,7 +11,13 @@
   PLATFORM_GUID                  = 5c21eb1a-2863-4576-b4d8-62b7928d0a3b
   PLATFORM_VERSION               = 0.1
   DSC_SPECIFICATION              = 0x0001001C
+!ifdef QEMU_TEST
+  # Test build: runs on "qemu-system-aarch64 -M virt,virtualization=on,gic-version=2"
+  # (PL011 UART + virt GIC addresses, no SD driver). Not for the board!
+  OUTPUT_DIRECTORY               = Build/OrangePiZero2W-QemuTest
+!else
   OUTPUT_DIRECTORY               = Build/OrangePiZero2W
+!endif
   SUPPORTED_ARCHITECTURES        = AARCH64
   BUILD_TARGETS                  = DEBUG|RELEASE
   SKUID_IDENTIFIER               = DEFAULT
@@ -126,6 +132,13 @@
   ShellLib|ShellPkg/Library/UefiShellLib/UefiShellLib.inf
   FileHandleLib|MdePkg/Library/UefiFileHandleLib/UefiFileHandleLib.inf
 
+!ifdef QEMU_TEST
+[LibraryClasses.common]
+  SerialPortLib|ArmPlatformPkg/Library/PL011SerialPortLib/PL011SerialPortLib.inf
+  PL011UartLib|ArmPlatformPkg/Library/PL011UartLib/PL011UartLib.inf
+  PL011UartClockLib|ArmPlatformPkg/Library/PL011UartClockLib/PL011UartClockLib.inf
+!endif
+
 [LibraryClasses.common.SEC]
   PrePiLib|EmbeddedPkg/Library/PrePiLib/PrePiLib.inf
   ExtractGuidedSectionLib|EmbeddedPkg/Library/PrePiExtractGuidedSectionLib/PrePiExtractGuidedSectionLib.inf
@@ -167,7 +180,14 @@
   gEfiMdePkgTokenSpaceGuid.PcdDriverDiagnostics2Disable|TRUE
   gEmbeddedTokenSpaceGuid.PcdPrePiProduceMemoryTypeInformationHob|TRUE
   gEfiMdeModulePkgTokenSpaceGuid.PcdTurnOffUsbLegacySupport|TRUE
-  gEfiMdeModulePkgTokenSpaceGuid.PcdConOutGopSupport|FALSE
+  gEfiMdeModulePkgTokenSpaceGuid.PcdConOutGopSupport|TRUE
+  # UART RX is not usable on this setup (only TX wired) -> ignore RX noise.
+  # Build with -D UART_INPUT=TRUE once RX works.
+!ifdef UART_INPUT
+  gH616TokenSpaceGuid.PcdSunxiUartInputEnable|TRUE
+!else
+  gH616TokenSpaceGuid.PcdSunxiUartInputEnable|FALSE
+!endif
 
 [PcdsFixedAtBuild.common]
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"Orange Pi Zero 2W EDK2 port"
@@ -239,6 +259,7 @@
   # Boot: shell is always a boot option (runs startup.nsh from the SD card)
   gArmTokenSpaceGuid.PcdUefiShellDefaultBootEnable|TRUE
   gEfiShellPkgTokenSpaceGuid.PcdShellLibAutoInitialize|FALSE
+  gEfiShellPkgTokenSpaceGuid.PcdShellDefaultDelay|1
   gEfiMdeModulePkgTokenSpaceGuid.PcdResetOnMemoryTypeInformationChange|FALSE
   gEfiMdeModulePkgTokenSpaceGuid.PcdBootManagerMenuFile|{ 0x21, 0xaa, 0x2c, 0x46, 0x14, 0x76, 0x03, 0x45, 0x83, 0x6e, 0x8a, 0xb6, 0xf4, 0x66, 0x23, 0x31 }
 
@@ -261,6 +282,14 @@
   gEfiMdeModulePkgTokenSpaceGuid.PcdImageProtectionPolicy|0x3
   gEfiMdeModulePkgTokenSpaceGuid.PcdDxeNxMemoryProtectionPolicy|0xC000000000007FD1
   gEfiMdeModulePkgTokenSpaceGuid.PcdSetNxForStack|TRUE
+
+!ifdef QEMU_TEST
+[PcdsFixedAtBuild.common]
+  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialRegisterBase|0x09000000
+  gArmPlatformTokenSpaceGuid.PL011UartClkInHz|24000000
+  gArmTokenSpaceGuid.PcdGicDistributorBase|0x08000000
+  gArmTokenSpaceGuid.PcdGicInterruptInterfaceBase|0x08010000
+!endif
 
 [PcdsDynamicDefault.common]
   # No keyboard input possible on this setup -> short timeout, then autoboot
@@ -321,7 +350,9 @@
   #
   # Board / SoC
   #
+!ifndef QEMU_TEST
   Silicon/Allwinner/H616Pkg/Drivers/SunxiMmcDxe/SunxiMmcDxe.inf
+!endif
   Platform/OrangePi/OrangePiZero2W/Drivers/FdtDxe/FdtDxe.inf
 
   #

@@ -22,3 +22,8 @@
   gH616TokenSpaceGuid.PcdSunxiMmcIndex|0|UINT32|0x00000002
   # Upper limit for the SD card clock in Hz (PIO mode; 50 MHz = SD high speed)
   gH616TokenSpaceGuid.PcdSunxiMmcMaxClock|50000000|UINT32|0x00000003
+
+[PcdsFeatureFlag]
+  # FALSE: ignore everything arriving on UART0 RX (for setups where only TX is
+  # wired, or RX is noisy). Keyboard input must then come from elsewhere.
+  gH616TokenSpaceGuid.PcdSunxiUartInputEnable|FALSE|BOOLEAN|0x00000010

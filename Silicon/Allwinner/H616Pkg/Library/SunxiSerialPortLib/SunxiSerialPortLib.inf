@@ -18,6 +18,7 @@
 [Packages]
   MdeModulePkg/MdeModulePkg.dec
   MdePkg/MdePkg.dec
+  Silicon/Allwinner/H616Pkg/H616Pkg.dec
 
 [LibraryClasses]
   IoLib
@@ -25,3 +26,6 @@
 [FixedPcd]
   gEfiMdeModulePkgTokenSpaceGuid.PcdSerialRegisterBase
   gEfiMdeModulePkgTokenSpaceGuid.PcdSerialBaudRate
+
+[FeaturePcd]
+  gH616TokenSpaceGuid.PcdSunxiUartInputEnable
