@@ -1,0 +1,47 @@
+## @file
+#  Allwinner H616/H618 HDMI GOP driver (DE33 + TCON TV + DW-HDMI).
+#
+#  SPDX-License-Identifier: GPL-2.0+
+##
+
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = SunxiHdmiDxe
+  FILE_GUID                      = 5a0c7e2d-3b61-4d8e-a1f7-9c2b4e6d8f31
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 0.1
+  ENTRY_POINT                    = SunxiHdmiDxeInitialize
+
+[Sources]
+  SunxiHdmiDxe.c
+  DwHdmi.c
+  DwHdmi.h
+  DwHdmiRegs.h
+
+[Packages]
+  MdeModulePkg/MdeModulePkg.dec
+  MdePkg/MdePkg.dec
+  Silicon/Allwinner/H616Pkg/H616Pkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  CacheMaintenanceLib
+  DebugLib
+  DevicePathLib
+  DxeServicesTableLib
+  FrameBufferBltLib
+  IoLib
+  MemoryAllocationLib
+  TimerLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Protocols]
+  gEfiGraphicsOutputProtocolGuid
+  gEfiDevicePathProtocolGuid
+  gEfiEdidDiscoveredProtocolGuid
+  gEfiEdidActiveProtocolGuid
+
+[Depex]
+  gEfiCpuArchProtocolGuid

@@ -58,6 +58,11 @@ READ_LOCK_STATUS   = TRUE
   INF EmbeddedPkg/MetronomeDxe/MetronomeDxe.inf
   INF MdeModulePkg/Universal/WatchdogTimerDxe/WatchdogTimer.inf
 
+!ifndef QEMU_TEST
+  INF Silicon/Allwinner/H616Pkg/Drivers/SunxiHdmiDxe/SunxiHdmiDxe.inf
+!endif
+  INF MdeModulePkg/Universal/Console/GraphicsConsoleDxe/GraphicsConsoleDxe.inf
+  INF Platform/OrangePi/OrangePiZero2W/Logo/LogoDxe.inf
   INF MdeModulePkg/Universal/SerialDxe/SerialDxe.inf
   INF MdeModulePkg/Universal/Console/ConPlatformDxe/ConPlatformDxe.inf
   INF MdeModulePkg/Universal/Console/ConSplitterDxe/ConSplitterDxe.inf
