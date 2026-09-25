@@ -14,7 +14,9 @@
 #include <Library/FdtLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include <Library/PcdLib.h>
+#include <Library/IoLib.h>
 #include <Library/UefiBootServicesTableLib.h>
+#include <Library/UefiLib.h>
 #include <Guid/Fdt.h>
 
 #include <H616.h>
@@ -25,6 +27,37 @@ STATIC EFI_GUID  mDtbFileGuid = {
 };
 
 #define FDT_EXTRA_SPACE  SIZE_16KB
+
+//
+// Green status LED (PC13) as a UART-independent progress indicator:
+//   SEC start -> ON, DXE (this driver) -> OFF, ReadyToBoot -> ON
+//
+STATIC
+VOID
+StatusLed (
+  IN BOOLEAN  On
+  )
+{
+  UINTN  DatReg;
+
+  DatReg = H616_PIO_DAT (H616_PIO_PORT_C);
+  if (On) {
+    MmioOr32 (DatReg, BIT13);
+  } else {
+    MmioAnd32 (DatReg, ~(UINT32)BIT13);
+  }
+}
+
+STATIC
+VOID
+EFIAPI
+OnReadyToBoot (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  StatusLed (TRUE);
+}
 
 STATIC
 VOID
@@ -72,6 +105,11 @@ FdtDxeInitialize (
   INT32       Ret;
   INT32       Len;
   CONST CHAR8 *Model;
+
+  EFI_EVENT   ReadyToBootEvent;
+
+  StatusLed (FALSE);
+  EfiCreateEventReadyToBootEx (TPL_CALLBACK, OnReadyToBoot, NULL, &ReadyToBootEvent);
 
   Status = GetSectionFromAnyFv (&mDtbFileGuid, EFI_SECTION_RAW, 0, &Dtb, &DtbSize);
   if (EFI_ERROR (Status)) {

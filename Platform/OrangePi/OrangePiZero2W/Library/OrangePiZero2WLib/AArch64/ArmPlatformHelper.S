@@ -32,7 +32,23 @@
   PUTC_W12
 .endm
 
+// Green status LED: PC13 (PIO bank C = 0x0300B048)
+#define PIO_PC_CFG1  0x0300B04C   // PC8..PC15, 4 bits each
+#define PIO_PC_DAT   0x0300B058
+
 ASM_FUNC(ArmPlatformPeiBootAction)
+  // LED on as the very first thing: visible proof that EDK2 is running,
+  // independent of the UART.
+  MOV32 (x9, PIO_PC_CFG1)
+  ldr   w10, [x9]
+  bic   w10, w10, #(0xF << 20)
+  orr   w10, w10, #(0x1 << 20)      // PC13 = output
+  str   w10, [x9]
+  MOV32 (x9, PIO_PC_DAT)
+  ldr   w10, [x9]
+  orr   w10, w10, #(1 << 13)        // PC13 = high -> LED on
+  str   w10, [x9]
+
   MOV32 (x9, UART0_BASE)
   PUTC  0x0d
   PUTC  0x0a

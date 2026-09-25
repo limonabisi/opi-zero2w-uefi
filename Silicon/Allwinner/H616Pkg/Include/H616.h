@@ -46,6 +46,7 @@
 #define H616_PIO_DAT(n)            (H616_PIO_BANK (n) + 0x10)
 #define H616_PIO_DRV(n, pin)       (H616_PIO_BANK (n) + 0x14 + ((pin) / 16) * 4)
 #define H616_PIO_PULL(n, pin)      (H616_PIO_BANK (n) + 0x1C + ((pin) / 16) * 4)
+#define H616_PIO_PORT_C            2
 #define H616_PIO_PORT_F            5
 #define H616_PIO_PORT_H            7
 #define H616_GPF_SDC0_FUNC         2

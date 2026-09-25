@@ -26,6 +26,8 @@
   DebugLib
   DxeServicesLib
   FdtLib
+  IoLib
+  UefiLib
   MemoryAllocationLib
   PcdLib
   UefiBootServicesTableLib
