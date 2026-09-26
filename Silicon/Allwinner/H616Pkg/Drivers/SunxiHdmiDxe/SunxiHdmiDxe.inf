@@ -35,13 +35,15 @@
   MemoryAllocationLib
   TimerLib
   UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
   UefiDriverEntryPoint
 
 [Protocols]
+  gEfiVariableArchProtocolGuid
   gEfiGraphicsOutputProtocolGuid
   gEfiDevicePathProtocolGuid
   gEfiEdidDiscoveredProtocolGuid
   gEfiEdidActiveProtocolGuid
 
 [Depex]
-  gEfiCpuArchProtocolGuid
+  gEfiCpuArchProtocolGuid AND gEfiVariableArchProtocolGuid
