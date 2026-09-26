@@ -1,98 +1,99 @@
-# Orange Pi Zero 2W (H618, 1 GB) — EDK2 UEFI portu
+# Orange Pi Zero 2W UEFI
 
-U-Boot proper yerine **TianoCore EDK2** çalıştıran bir önyükleyici. Hedef: SD karttan açılıp
-UEFI ortamı sunmak (UEFI Shell, FAT, `BOOTAA64.EFI` ile Linux/GRUB başlatma, Device Tree).
+UEFI firmware (TianoCore EDK2) for the **Orange Pi Zero 2W** (Allwinner H618, 1 GB).
+It replaces U-Boot proper: the board boots from the microSD card into a UEFI
+environment with a graphical setup, USB and HDMI support, Secure Boot and ACPI
+tables for Windows on ARM.
 
-> Durum (v0.2.0): **donanımda çalışıyor** — SPL → TF-A → EDK2 → UEFI Shell; SD kart (FAT) okunuyor,
-> `startup.nsh` otomatik çalışıyor, DTB EFI tablosunda. Sıradaki adım: Linux açmak.
->
-> Önemli: TF-A'ya `patches/tf-a-0001-sunxi-edk2-bl33.patch` uygulanmalı (build-all.sh yapıyor).
-> Yamasız BL31, DTB bulamayınca PMIC kodunda NULL okuyup çöküyor.
+<p>
+  <img src="docs/images/setup-main.png" width="49%" alt="Setup, Main page">
+  <img src="docs/images/boot-menu.png" width="49%" alt="Boot menu">
+</p>
 
-## Boot zinciri
+Feature status: **[docs/STATUS.md](docs/STATUS.md)**
 
-```
-BROM (SoC ROM)
- └─ SD kart 8 KiB: U-Boot SPL  ... sadece LPDDR4 DRAM init + AXP313 PMIC (mainline, orangepi_zero2w_defconfig)
-     └─ FIT @ 8 KiB+40 KiB
-         ├─ TF-A BL31  -> 0x40000000  (EL3, PSCI: SMP / reset / poweroff)
-         └─ EDK2 FD    -> 0x4A000000  (BL33, EL2)   <-- U-Boot proper'ın yerine
-             PeilessSec -> DXE -> BDS -> BOOTAA64.EFI / UEFI Shell (startup.nsh)
-```
+## Highlights
 
-## Hazır dosyalar (`out/`)
+- Graphical setup (**F2**) and boot menu (**ESC**), English and Turkish
+- HDMI output at 720p or 1080p (UEFI GOP)
+- USB host port with EHCI + OHCI: keyboards, hubs, USB drives, boot from USB
+- microSD read/write, FAT and Ext4
+- Settings kept on the microSD card (UEFI variables), real-time clock
+- UEFI Secure Boot with the Microsoft KEK and db certificates, switched on in setup
+- CPU raised to the chip's rated maximum (1416 MHz on most H618), temperature in setup
+- ACPI tables (FADT, MADT, GTDT, DSDT, DBG2, SPCR) and SMBIOS
+- The OS is started at EL2, so hardware virtualization is available to it
+- UEFI Shell
 
-| Dosya | Ne işe yarar |
+## Install
+
+1. Download `opi-zero2w-edk2-sd-vX.Y.Z.zip` from the [Releases](../../releases).
+2. Write `opi-zero2w-edk2-sd.img` to a microSD card with balenaEtcher or Rufus.
+3. Connect HDMI and a USB keyboard to the USB-C host port, insert the card and power on.
+
+`opi-zero2w-edk2-boot.bin` is the firmware alone. It can be written over an existing card
+at 8 KiB (`dd if=opi-zero2w-edk2-boot.bin of=/dev/sdX bs=1k seek=8`).
+
+| Key during boot | Action |
 |---|---|
-| `opi-zero2w-edk2-sd.img` | Tam SD kart imajı (64 MB). **Rufus** veya **balenaEtcher** ile karta yaz. |
-| `opi-zero2w-edk2-boot.bin` | Sadece önyükleyici. Mevcut bir karta `dd if=... of=/dev/sdX bs=1k seek=8` ile yazılır (Linux imajının üstüne EDK2 koymak için). |
+| F2 | Setup |
+| ESC | Boot menu (choose a device, UEFI Shell) |
+| Enter | Continue booting |
 
-SD imajının FAT32 bölümünde:
-- `startup.nsh` — UEFI Shell açılınca **kendiliğinden** çalışır. UART'tan yazamadığın için komutları buraya koy (kartı PC'de düzenle).
-- `EFI/BOOT/` — buraya `BOOTAA64.EFI` (GRUB, systemd-boot veya EFI stub'lı Linux çekirdeği) koyarsan otomatik başlar.
-- `dtb/` — kartın device tree dosyası (firmware zaten kendi içindekini EFI tablosu olarak veriyor).
+Serial console: UART0 on the 40-pin header (pin 6 GND, pin 8 TX), 115200 8N1.
 
-## UART (sadece okuma yeterli)
-
-- Header: **pin 6 GND, pin 8 TX (PH0)** → adaptörün RX'ine. 115200 8N1.
-- Firmware hiçbir tuşa basılmasını beklemez: 2 sn zaman aşımı → otomatik boot → yoksa UEFI Shell + `startup.nsh`.
-- DEBUG build olduğu için her sürücünün yüklenişi UART'a basılır.
-
-Beklenen log sırası (kısaltılmış):
-```
-U-Boot SPL 2025.07 ... DRAM: 1024 MiB ... Trying to boot from MMC1
-NOTICE:  BL31: v2.13.0 ... NOTICE:  BL31: Detected Allwinner H616 SoC
-[EDK2] Orange Pi Zero 2W (H618) - UEFI firmware starting
-... SunxiMmc: SMHC0 @ 0x4020000 ... FdtDxe: installing DT "OrangePi Zero 2W"
-... UEFI Interactive Shell ... === Orange Pi Zero 2W / H618 - EDK2 startup.nsh ===
-```
-
-## Yeniden derleme
-
-**Windows + WSL:** `scripts\windows\1-wsl-kur.bat` (yönetici, bir kere, sonra yeniden başlat) →
-`scripts\windows\2-derle.bat`. Çıktılar `out\` klasörüne gelir.
-
-**Linux / WSL içinden:** `bash scripts/build-all.sh` (DEBUG) veya `bash scripts/build-all.sh RELEASE`.
-
-Sürümler: U-Boot v2025.07 (SPL), TF-A v2.13.0, EDK2 edk2-stable202608.
-
-## Kaynak yapısı
+## Boot chain
 
 ```
-Silicon/Allwinner/H616Pkg/
-  H616Pkg.dec
-  Include/H616.h                       register haritası (CCU, PIO, GIC, UART, SMHC)
-  Drivers/SunxiMmcDxe/                 SD kart sürücüsü (PIO, 400 kHz -> 50 MHz, 4-bit, auto-stop)
-Platform/OrangePi/OrangePiZero2W/
-  OrangePiZero2W.dsc / .fdf            platform tanımı, FD @ 0x4A000000 (1 MB)
-  Library/OrangePiZero2WLib/           ArmPlatformLib: bellek haritası (BL31 deliği), çekirdek listesi
-  Drivers/FdtDxe/                      gömülü DTB'yi EFI FDT tablosu olarak kurar, /memory düzeltir
-  DeviceTree/sun50i-h618-orangepi-zero2w.dtb
-scripts/  build-all.sh, build-edk2.sh, make-image.sh, windows/*.bat
-sdcard/startup.nsh
+BROM
+ └─ microSD @ 8 KiB: U-Boot SPL (DRAM + PMIC init)
+     └─ FIT image
+         ├─ TF-A BL31   0x40000000   EL3, PSCI
+         └─ EDK2 FD     0x4A000000   EL2 (2 MiB: DXE firmware volume + 128 KiB variable store)
 ```
 
-## Bellek haritası
+## Build
 
-| Adres | İçerik |
+Ubuntu 24.04 (or WSL2 Ubuntu on Windows, see `scripts/windows/`):
+
+```sh
+bash scripts/build-all.sh           # DEBUG build, verbose UART log
+bash scripts/build-all.sh RELEASE
+```
+
+The script installs the packages, fetches U-Boot v2025.07, TF-A v2.13.0, EDK2 and
+edk2-platforms, applies the patches in `patches/` and writes the images to `out/`.
+
+A QEMU test build (`EDK2_EXTRA_FLAGS="-D QEMU_TEST" scripts/build-edk2.sh`) runs the same
+firmware on `qemu-system-aarch64 -M virt` with a RAM framebuffer, which is how the
+setup screenshots were taken.
+
+## Source layout
+
+| Path | Contents |
 |---|---|
-| `0x0000_0000 – 0x3FFF_FFFF` | SRAM + çevre birimleri (Device) |
-| `0x4000_0000 – 0x4003_FFFF` | TF-A BL31 (UEFI'ye verilmez) |
-| `0x4004_0000 – 0x7FFF_FFFF` | DRAM (UEFI/OS) |
-| `0x4A00_0000 – 0x4A0F_FFFF` | EDK2 FD (boot services data) |
-| `0x7C00_0000 – 0x7FFF_FFFF` | UEFI'nin ilk 64 MB çalışma alanı |
+| `Platform/OrangePi/OrangePiZero2W` | Board: DSC/FDF, ACPI tables, setup application (`Applications/OpiSetup`), variable store, SMBIOS, logo, Secure Boot keys |
+| `Silicon/Allwinner/H616Pkg` | SoC drivers: MMC, USB (EHCI bring-up, OHCI), HDMI (DE33 + TCON + DW-HDMI), RTC, CPU clock and thermal sensor |
+| `patches/` | Small patches for EDK2 (USB root port reset, boot hot keys) and TF-A (BL33 hand-off without a DTB) |
+| `scripts/` | Build and SD image scripts |
 
-## Yapılacaklar (yol haritası)
+## Known limitations
 
-1. ~~Donanım testi~~ — tamam: Shell + SD + FAT + DTB çalışıyor.
-1b. Linux: `EFI/BOOT/BOOTAA64.EFI` (GRUB veya EFI stub'lı çekirdek) ile açılış.
-2. SD sürücüsü: DMA (IDMAC) ile hız, kart algılama (PF6).
-3. USB (EHCI1/OHCI1 NonDiscoverable) → USB klavye ile giriş (UART RX olmadan etkileşim).
-4. Kalıcı değişkenler: SPI NOR (varsa) veya SD kartta dosya tabanlı değişken deposu.
-5. HDMI GOP (DE3.3 + HDMI PHY) — en zor adım.
-6. Wi-Fi (SDIO, SMHC1) ve RTC.
-7. ACPI (Windows / genel ARM dağıtımları için) — isteğe bağlı.
+- HDMI EDID cannot be read on this board, the resolution is chosen in setup.
+- Only the USB host port works, the OTG port on the power connector has no driver.
+- No Wi-Fi, Bluetooth or network boot.
+- Linux needs a Device Tree boot mode, which is not done yet (ACPI only for now).
+- Windows cannot use the microSD card (the controller is not SDHCI); install it on a USB drive.
 
-## Lisans
+## License
 
-Platform kodu BSD-2-Clause-Patent (EDK2 ile aynı). Register değerleri mainline Linux / U-Boot'tan alınmıştır.
+BSD-2-Clause-Patent, like EDK2. Third-party parts are listed in [THIRD-PARTY.md](THIRD-PARTY.md).
+
+---
+
+### Türkçe
+
+Orange Pi Zero 2W için EDK2 tabanlı UEFI firmware. Releases'tan zip'i indir,
+`opi-zero2w-edk2-sd.img` dosyasını balenaEtcher/Rufus ile SD karta yaz. Açılışta
+**F2** kurulum ekranı, **ESC** açılış menüsü. Setup'ta dil Türkçe seçilebilir.
+Özellik durumu: [docs/STATUS.md](docs/STATUS.md).
