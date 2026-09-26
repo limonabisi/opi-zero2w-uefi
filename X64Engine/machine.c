@@ -32,10 +32,18 @@ io_in (uc_engine *uc, uint32_t port, int size, void *opaque)
       v = 0x02;                   /* A20 enabled */
       break;
     case 0xcfc: case 0xcfd: case 0xcfe: case 0xcff: case 0xcf8:
-      v = 0xffffffff;             /* no PCI (yet) */
+      v = pci_io_read (m, (uint16_t)port, size);
       break;
     default:
       v = 0xffffffff;
+      for (int i = 0; i < m->nvblk; i++) {
+        uint32_t base = pci_bar_io (&m->vblk[i].pci, 0);
+        if (base && port >= base && port < base + 0x40) {
+          vblk_io_read (m, &m->vblk[i], (uint16_t)(port - base), size, &v);
+          break;
+        }
+      }
+
       break;
   }
 
@@ -85,7 +93,18 @@ io_out (uc_engine *uc, uint32_t port, int size, uint32_t val, void *opaque)
       }
 
       break;
+    case 0xcf8: case 0xcfc: case 0xcfd: case 0xcfe: case 0xcff:
+      pci_io_write (m, (uint16_t)port, size, val);
+      break;
     default:
+      for (int i = 0; i < m->nvblk; i++) {
+        uint32_t base = pci_bar_io (&m->vblk[i].pci, 0);
+        if (base && port >= base && port < base + 0x40) {
+          vblk_io_write (m, &m->vblk[i], (uint16_t)(port - base), size, val);
+          break;
+        }
+      }
+
       break;
   }
 }
@@ -312,6 +331,22 @@ machine_init (machine_t *m, uint64_t ram_mb)
   pit_init (m);
   uart_init (m);
   i8042_init (m);
+  pci_init (m);
+  return 0;
+}
+
+/* attach a disk as virtio-blk (slots 2, 3; IRQ 11, 10) */
+int
+machine_add_disk (machine_t *m, void *disk, uint64_t size, int readonly)
+{
+  static const int irqs[2] = { 11, 10 };
+
+  if (m->nvblk >= 2) {
+    return -1;
+  }
+
+  vblk_init (m, &m->vblk[m->nvblk], 2 + m->nvblk, irqs[m->nvblk], disk, size, readonly);
+  m->nvblk++;
   return 0;
 }
 

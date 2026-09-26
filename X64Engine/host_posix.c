@@ -95,12 +95,30 @@ host_log (const char *fmt, ...)
   va_end (ap);
 }
 
+void
+host_free (void *p, size_t size)
+{
+  munmap (p, size);
+}
+
 void *
 host_alloc (size_t size)
 {
   void *p = mmap (NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
   return p == MAP_FAILED ? NULL : p;
+}
+
+int
+host_disk_read (void *disk, uint64_t off, void *buf, uint32_t len)
+{
+  return pread ((int)(intptr_t)disk, buf, len, (off_t)off) == (ssize_t)len ? 0 : -1;
+}
+
+int
+host_disk_write (void *disk, uint64_t off, const void *buf, uint32_t len)
+{
+  return pwrite ((int)(intptr_t)disk, buf, len, (off_t)off) == (ssize_t)len ? 0 : -1;
 }
 
 static uint8_t *
@@ -133,21 +151,24 @@ main (int argc, char **argv)
 {
   static machine_t m;
   struct timespec  ts;
-  uint8_t         *k, *ird = NULL;
-  size_t           ks, is = 0;
+  uint8_t         *k = NULL, *ird = NULL;
+  size_t           ks = 0, is = 0;
   const char      *cmd = "console=ttyS0 earlyprintk=serial nolapic noapic nokaslr";
   struct termios   tio;
   int              ram_mb = getenv ("X64E_RAM") ? atoi (getenv ("X64E_RAM")) : 512;
 
-  if (argc < 2) {
-    fprintf (stderr, "usage: %s bzImage [initrd] [cmdline]\n", argv[0]);
+  if (argc < 2 && !getenv ("X64E_ISO")) {
+    fprintf (stderr, "usage: %s bzImage [initrd] [cmdline]\n       X64E_ISO=file.iso [X64E_ENTRY=n] %s\n", argv[0], argv[0]);
     return 1;
   }
 
   clock_gettime (CLOCK_MONOTONIC, &ts);
   t0 = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 
-  k = load_file (argv[1], &ks);
+  if (argc > 1) {
+    k = load_file (argv[1], &ks);
+  }
+
   if (argc > 2 && argv[2][0]) {
     ird = load_file (argv[2], &is);
   }
@@ -163,7 +184,59 @@ main (int argc, char **argv)
   clock_gettime (CLOCK_REALTIME, &ts);
   m.boot_ns = (uint64_t)ts.tv_sec * 1000000000ULL;
 
-  if (linux_boot_setup (&m, k, ks, ird, is, cmd)) {
+  /* X64E_DISK=file[:ro] (comma separated, up to two) */
+  if (getenv ("X64E_DISK")) {
+    char *list = strdup (getenv ("X64E_DISK")), *tok, *save;
+
+    for (tok = strtok_r (list, ",", &save); tok; tok = strtok_r (NULL, ",", &save)) {
+      int   ro = 0, fd;
+      char *c  = strrchr (tok, ':');
+
+      if (c && strcmp (c, ":ro") == 0) {
+        *c = 0;
+        ro = 1;
+      }
+
+      fd = open (tok, ro ? O_RDONLY : O_RDWR);
+      if (fd < 0) {
+        perror (tok);
+        return 1;
+      }
+
+      machine_add_disk (&m, (void *)(intptr_t)fd, (uint64_t)lseek (fd, 0, SEEK_END), ro);
+      fprintf (stderr, "x64e: disk %s%s\n", tok, ro ? " (read-only)" : "");
+    }
+  }
+
+  if (getenv ("X64E_ISO")) {
+    static bootlist_t bl;
+    iso_t      iso;
+    int        fd = open (getenv ("X64E_ISO"), O_RDONLY), i, sel;
+
+    if (fd < 0) {
+      perror (getenv ("X64E_ISO"));
+      return 1;
+    }
+
+    machine_add_disk (&m, (void *)(intptr_t)fd, (uint64_t)lseek (fd, 0, SEEK_END), 1);
+    if (iso_open (&iso, (void *)(intptr_t)fd) || bootcfg_scan (&iso, &bl) == 0) {
+      fprintf (stderr, "x64e: no boot entries found on the ISO\n");
+      return 1;
+    }
+
+    for (i = 0; i < bl.count; i++) {
+      fprintf (stderr, "  [%d] %s\n", i, bl.e[i].title);
+    }
+
+    sel = getenv ("X64E_ENTRY") ? atoi (getenv ("X64E_ENTRY")) : 0;
+    if (sel < 0 || sel >= bl.count) {
+      sel = 0;
+    }
+
+    if (iso_boot (&m, &iso, &bl.e[sel], getenv ("X64E_APPEND") ? getenv ("X64E_APPEND") : "console=ttyS0 nolapic noapic")) {
+      return 1;
+    }
+  } else if (linux_boot_setup (&m, k, ks, ird, is, cmd)) {
     return 1;
   }
 

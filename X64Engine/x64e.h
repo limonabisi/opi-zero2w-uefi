@@ -84,6 +84,68 @@ uint32_t i8042_io_read (machine_t *m, uint16_t port);
 void     i8042_io_write (machine_t *m, uint16_t port, uint8_t val);
 void     i8042_key (machine_t *m, uint8_t code);
 
+/* ------------------------------------------------------------ pci ---- */
+typedef struct {
+  int      slot;
+  uint8_t  cfg[256];
+  uint32_t bar_size[6];
+  uint8_t  bar_io[6];
+} pci_dev_t;
+
+void     pci_init (machine_t *m);
+void     pci_register (machine_t *m, pci_dev_t *d);
+void     pci_init_config (pci_dev_t *d, uint16_t vendor, uint16_t device, uint32_t class_rev,
+                          uint16_t sub_vendor, uint16_t sub_device);
+uint32_t pci_bar_io (pci_dev_t *d, int b);
+uint32_t pci_io_read (machine_t *m, uint16_t port, int size);
+void     pci_io_write (machine_t *m, uint16_t port, int size, uint32_t val);
+
+/* ----------------------------------------------------- virtio-blk ---- */
+typedef struct {
+  pci_dev_t pci;
+  void     *disk;
+  uint64_t  disk_size;
+  int       readonly;
+  uint32_t  guest_features, pfn;
+  uint16_t  last_avail;
+  uint8_t   status, isr;
+  uint64_t  requests;
+} vblk_t;
+
+int  host_disk_read (void *disk, uint64_t off, void *buf, uint32_t len);
+int  host_disk_write (void *disk, uint64_t off, const void *buf, uint32_t len);
+void vblk_init (machine_t *m, vblk_t *v, int slot, int irq, void *disk, uint64_t size, int ro);
+int  vblk_io_read (machine_t *m, vblk_t *v, uint16_t off, int size, uint32_t *val);
+void vblk_io_write (machine_t *m, vblk_t *v, uint16_t off, int size, uint32_t val);
+
+/* ------------------------------------------------------ ISO / boot ---- */
+typedef struct {
+  void    *disk;
+  uint32_t root_lba, root_size;
+} iso_t;
+
+#define MAX_BOOT_ENTRIES 16
+
+typedef struct {
+  char title[96];
+  char kernel[160];
+  char args[512];
+  char initrd[4][160];
+  int  ninitrd;
+} bootent_t;
+
+typedef struct {
+  bootent_t e[MAX_BOOT_ENTRIES];
+  int       count;
+} bootlist_t;
+
+void     host_free (void *p, size_t size);
+int      iso_open (iso_t *iso, void *disk);
+int      iso_lookup (iso_t *iso, const char *path, uint32_t *lba, uint32_t *size);
+uint8_t *iso_read_file (iso_t *iso, const char *path, size_t *size);
+int      bootcfg_scan (iso_t *iso, bootlist_t *bl);
+int      iso_boot (machine_t *m, iso_t *iso, bootent_t *e, const char *extra_args);
+
 /* ----------------------------------------------------------- cmos ---- */
 uint32_t cmos_io_read (machine_t *m, uint16_t port);
 void     cmos_io_write (machine_t *m, uint16_t port, uint8_t val);
@@ -100,6 +162,11 @@ struct machine {
   uart_t      uart;
   i8042_t     kbd;
   int         reset_request;
+  pci_dev_t  *pci[8];
+  int         npci;
+  uint32_t    pci_addr;
+  vblk_t      vblk[2];
+  int         nvblk;
   uint8_t     cmos_index;
   uint8_t     cmos[128];
   uint64_t    boot_ns;
@@ -113,6 +180,7 @@ int linux_boot_setup (machine_t *m, const uint8_t *kernel, size_t ksize,
 
 int  machine_init (machine_t *m, uint64_t ram_mb);
 void machine_dump (machine_t *m, const char *why);
+int  machine_add_disk (machine_t *m, void *disk, uint64_t size, int readonly);
 int  machine_v2p (machine_t *m, uint64_t va, uint64_t *pa);
 void machine_run (machine_t *m);
 
