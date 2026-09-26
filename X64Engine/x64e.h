@@ -10,7 +10,18 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#ifdef X64E_UEFI
+#include <unicorn.h>
+#else
 #include <unicorn/unicorn.h>
+#endif
+
+#ifdef X64E_UEFI
+/* EDK2 PrintLib: %s is UTF-16 there; the shim rewrites %s to %a */
+int x64e_snprintf (char *buf, size_t size, const char *fmt, ...);
+#undef snprintf
+#define snprintf x64e_snprintf
+#endif
 
 /* ------------------------------------------------------------ host --- */
 uint64_t host_now_ns (void);
@@ -20,6 +31,8 @@ void     host_idle_until (uint64_t deadline_ns);/* sleep, wake on input  */
 void     host_start_kick_timer (uc_engine *uc, uint32_t period_us);
 void     host_log (const char *fmt, ...);
 void    *host_alloc (size_t size);             /* zeroed, page aligned   */
+struct machine;
+void     host_poll_input (struct machine *m);   /* keyboard etc.         */
 
 /* ------------------------------------------------------------ irq ---- */
 typedef struct {
@@ -167,6 +180,7 @@ struct machine {
   uart_t      uart;
   i8042_t     kbd;
   int         reset_request;
+  int         quit;
   int         console_to_kbd;     /* host console input goes to the PS/2 keyboard */
   pci_dev_t  *pci[8];
   int         npci;

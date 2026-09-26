@@ -81,5 +81,11 @@ PART="$WORK/part.img"; truncate -s $((60*1024*1024)) "$PART"
 mkfs.vfat -F 32 -n OPIZ2WEFI "$PART" >/dev/null
 mmd -i "$PART" ::/EFI ::/EFI/BOOT ::/dtb
 mcopy -i "$PART" "$DTB" ::/dtb/sun50i-h618-orangepi-zero2w.dtb
+# x64 Engine (x86-64 PC), started from the boot menu
+X64E="$TOP/Platform/OrangePi/OrangePiZero2W/Binaries/X64Engine/X64Engine.efi"
+if [ -f "$X64E" ]; then
+  mmd -i "$PART" ::/EFI/X64ENGINE
+  mcopy -i "$PART" "$X64E" ::/EFI/X64ENGINE/X64ENGINE.EFI
+fi
 dd if="$PART" of="$IMG" bs=1M seek=4 conv=notrunc status=none
 echo "SD image   : $IMG"

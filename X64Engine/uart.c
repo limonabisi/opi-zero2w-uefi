@@ -209,7 +209,32 @@ uart_init (machine_t *m)
 }
 
 /* ------------------------------------------------------------------ RTC */
-#include <time.h>
+typedef struct {
+  int sec, min, hour, wday, mday, mon, year;   /* mon 1-12, full year */
+} rtc_tm_t;
+
+/* civil date from days since 1970-01-01 (Howard Hinnant's algorithm) */
+static void
+rtc_now (machine_t *m, rtc_tm_t *t)
+{
+  uint64_t s    = host_now_ns () / 1000000000ULL + m->boot_ns / 1000000000ULL;
+  int64_t  days = (int64_t)(s / 86400), z, era, doe, yoe, doy, mp;
+  uint32_t sod  = (uint32_t)(s % 86400);
+
+  t->sec  = sod % 60;
+  t->min  = (sod / 60) % 60;
+  t->hour = sod / 3600;
+  t->wday = (int)((days + 4) % 7);          /* 1970-01-01 was a Thursday */
+  z       = days + 719468;
+  era     = z / 146097;
+  doe     = z - era * 146097;
+  yoe     = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  doy     = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  mp      = (5 * doy + 2) / 153;
+  t->mday = (int)(doy - (153 * mp + 2) / 5 + 1);
+  t->mon  = (int)(mp < 10 ? mp + 3 : mp - 9);
+  t->year = (int)(yoe + era * 400 + (t->mon <= 2));
+}
 
 static uint8_t
 bcd (int v)
@@ -217,17 +242,10 @@ bcd (int v)
   return (uint8_t)(((v / 10) << 4) | (v % 10));
 }
 
-static void
-rtc_now (machine_t *m, struct tm *t)
-{
-  time_t s = (time_t)(host_now_ns () / 1000000000ULL) + (time_t)(m->boot_ns / 1000000000ULL);
-  gmtime_r (&s, t);
-}
-
 uint32_t
 cmos_io_read (machine_t *m, uint16_t port)
 {
-  struct tm t;
+  rtc_tm_t  t;
   int       binary, idx;
   int       v = -1;
 
@@ -240,14 +258,14 @@ cmos_io_read (machine_t *m, uint16_t port)
   if (idx <= 9 || idx == 0x32) {
     rtc_now (m, &t);
     switch (idx) {
-      case 0: v = t.tm_sec; break;
-      case 2: v = t.tm_min; break;
-      case 4: v = t.tm_hour; break;
-      case 6: v = t.tm_wday + 1; break;
-      case 7: v = t.tm_mday; break;
-      case 8: v = t.tm_mon + 1; break;
-      case 9: v = t.tm_year % 100; break;
-      case 0x32: v = 19 + t.tm_year / 100; break;
+      case 0: v = t.sec; break;
+      case 2: v = t.min; break;
+      case 4: v = t.hour; break;
+      case 6: v = t.wday + 1; break;
+      case 7: v = t.mday; break;
+      case 8: v = t.mon; break;
+      case 9: v = t.year % 100; break;
+      case 0x32: v = t.year / 100; break;
       default: return m->cmos[idx];      /* alarms */
     }
 

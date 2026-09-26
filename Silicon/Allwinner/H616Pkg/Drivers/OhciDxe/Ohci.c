@@ -832,7 +832,7 @@ OhciBulkTransfer(
     }
     *DataLength = 0;
   } else {
-    DEBUG ((DEBUG_INFO, "Bulk transfer successed\r\n"));
+    DEBUG ((DEBUG_VERBOSE, "Bulk transfer successed\r\n"));
   }
   //*DataToggle = (UINT8) OhciGetEDField (Ed, ED_DTTOGGLE);
 

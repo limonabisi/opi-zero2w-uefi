@@ -7,7 +7,7 @@
 State: Active
 Codename: opizero2w
 SoC: Allwinner H618 (4x Cortex-A53, 1 GB LPDDR4)
-Version: 0.9.0-h618
+Version: 0.10.0-h618
 
 Contributors: limonabisi
 
@@ -41,6 +41,7 @@ Legend: ✅ Working · ⚠️ Partially working · ❌ Not working · ❓ Not te
 | TPM | No hardware TPM | ❌ |
 | Windows Boot | Windows 10 ARM64 from a USB drive | ✅ |
 | x64 Bridge | x86-64 UEFI apps and boot loaders (Shell, GRUB), not x86-64 OS kernels | ⚠️ |
+| x64 Engine | Whole x86-64 PC: boots x86-64 Linux ISOs (preview, no network, slow) | ⚠️ |
 | Linux Boot | Needs Device Tree mode | ❌ |
 
 ## OS Status

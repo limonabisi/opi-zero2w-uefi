@@ -46,6 +46,12 @@ host_console_read (void)
   return -1;
 }
 
+void
+host_poll_input (machine_t *m)
+{
+  (void)m;
+}
+
 static machine_t *fb_machine;
 
 static void

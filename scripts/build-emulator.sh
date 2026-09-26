@@ -15,8 +15,9 @@ fetch https://github.com/intel/unicorn-for-efi.git "$SRC/unicorn" $UNICORN_REV
 apply() { (cd "$1" && if git apply --check "$2" 2>/dev/null; then git apply "$2"; fi) }
 apply "$SRC/MultiArchUefiPkg" "$TOP/patches/multiarchuefipkg-0001-opi-zero2w.patch"
 apply "$SRC/unicorn" "$TOP/patches/unicorn-0001-cpuid-fpu-tsc.patch"
+apply "$SRC/unicorn" "$TOP/patches/unicorn-0002-x64-engine-system-mode.patch"
 export WORKSPACE="$TOP/build/emu-ws"
-export PACKAGES_PATH="$SRC/edk2:$SRC"
+export PACKAGES_PATH="$SRC/edk2:$SRC:$TOP"
 export GCC_AARCH64_PREFIX="${GCC_AARCH64_PREFIX:-aarch64-linux-gnu-}"
 mkdir -p "$WORKSPACE"
 set +u
@@ -27,3 +28,10 @@ OUT="$WORKSPACE/Build/MultiArchUefiPkg/${TARGET}_GCC/AARCH64/EmulatorDxe.efi"
 mkdir -p "$TOP/Platform/OrangePi/OrangePiZero2W/Binaries/EmulatorDxe"
 cp "$OUT" "$TOP/Platform/OrangePi/OrangePiZero2W/Binaries/EmulatorDxe/EmulatorDxe.efi"
 ls -la "$TOP/Platform/OrangePi/OrangePiZero2W/Binaries/EmulatorDxe/EmulatorDxe.efi"
+
+# x64 Engine (x86-64 PC), an application on the SD card's FAT partition
+cp "$TOP/X64Engine/X64Engine.dsc" "$SRC/MultiArchUefiPkg/X64Engine.dsc"
+build -a AARCH64 -t GCC -b "$TARGET" -n "$(nproc)" -p MultiArchUefiPkg/X64Engine.dsc
+mkdir -p "$TOP/Platform/OrangePi/OrangePiZero2W/Binaries/X64Engine"
+cp "$WORKSPACE/Build/X64Engine/${TARGET}_GCC/AARCH64/X64Engine.efi" "$TOP/Platform/OrangePi/OrangePiZero2W/Binaries/X64Engine/X64Engine.efi"
+ls -la "$TOP/Platform/OrangePi/OrangePiZero2W/Binaries/X64Engine/X64Engine.efi"

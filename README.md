@@ -29,6 +29,7 @@ Feature status: **[docs/STATUS.md](docs/STATUS.md)**
 - The OS is started at EL2, so hardware virtualization is available to it
 - UEFI Shell
 - **x64 Bridge**: an optional x86-64 UEFI emulator in the firmware, so x86-64 UEFI apps and boot loaders run on the ARM64 board
+- **x64 Engine** (preview): a whole x86-64 PC emulated by the firmware, boots x86-64 Linux ISOs
 
 ## x64 Bridge
 
@@ -48,6 +49,23 @@ x86-64 UEFI applications, the x86-64 UEFI Shell and boot loaders such as GRUB ru
 and use the board's native drivers (display, keyboard, USB, microSD). An x86-64 **operating system**
 cannot run: once the boot loader hands over to the kernel, UEFI boot services are gone and there is
 no CPU emulation left. Emulated code is also much slower than native code.
+
+## x64 Engine (preview)
+
+A complete x86-64 PC run by the firmware itself, so a 64-bit x86 **operating system** can boot on
+the board: CPU (unicorn / QEMU TCG in a new system mode), interrupt controller, timer, serial port,
+RTC, PS/2 keyboard, PCI, virtio disk and a framebuffer on the HDMI output. It reads the ISO's own
+GRUB / isolinux menu and starts the kernel from it; the ISO is the x86 system's `/dev/vda`.
+
+1. Write the ISO to a USB drive (balenaEtcher), or copy the `.iso` file to the root of a FAT32 USB drive.
+2. Press **ESC** at boot, choose **x64 PC · run an x86-64 ISO**, pick the ISO and the menu entry.
+3. **F12** returns to the firmware. The x86 system's serial console is mirrored on the board's UART.
+
+<p><img src="docs/images/x64engine-installer.png" width="49%" alt="Ubuntu x86-64 installer in the x64 Engine"></p>
+
+Status: Ubuntu x86-64 kernels boot to a shell and the Ubuntu `mini.iso` installer runs. Linux ISOs only
+(Windows x64 needs more than the board's 1 GB), no network card yet, roughly 10x slower than native.
+Source and design notes: [X64Engine/](X64Engine/).
 
 ## Install
 

@@ -1,0 +1,60 @@
+## @file
+#  x64 Engine: an x86-64 PC emulated by the firmware (UEFI application).
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = X64Engine
+  FILE_GUID                      = 3e9c5f14-7b2a-4d61-a8e0-54c2d19f6b73
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 0.1
+  ENTRY_POINT                    = X64EngineMain
+
+[Sources]
+  x64e.h
+  machine.c
+  pic.c
+  pit.c
+  uart.c
+  i8042.c
+  keymap.c
+  pci.c
+  virtio_blk.c
+  iso9660.c
+  bootcfg.c
+  linuxboot.c
+  host_uefi.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  unicorn/efi/UnicornPkg.dec
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiLib
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+  MemoryAllocationLib
+  BaseMemoryLib
+  BaseLib
+  PrintLib
+  SerialPortLib
+  CpuLib
+  DevicePathLib
+  UnicornX86Lib
+  UnicornStubLib
+  UnicornEngineLib
+
+[Protocols]
+  gEfiGraphicsOutputProtocolGuid
+  gEfiBlockIoProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid
+
+[Guids]
+  gEfiFileInfoGuid
+
+[BuildOptions]
+  GCC:*_*_*_CC_FLAGS = -DX64E_UEFI -DUNICORN_FOR_EFI_INTERNAL -Wno-unused-variable -Wno-unused-function

@@ -109,6 +109,18 @@ io_out (uc_engine *uc, uint32_t port, int size, uint32_t val, void *opaque)
   }
 }
 
+static uint32_t
+parse_uint (const char *s)
+{
+  uint32_t v = 0;
+
+  while (*s >= '0' && *s <= '9') {
+    v = v * 10 + (uint32_t)(*s++ - '0');
+  }
+
+  return v;
+}
+
 static uint64_t trace_ring[256];
 static unsigned trace_pos;
 
@@ -317,7 +329,7 @@ machine_init (machine_t *m, uint64_t ram_mb)
   uc_hook_add (m->uc, &h, UC_HOOK_INSN, io_out, m, 1, 0, UC_X86_INS_OUT);
   uc_hook_add (m->uc, &h, UC_HOOK_MEM_UNMAPPED, mem_invalid, m, 1, 0);
   if (getenv ("X64E_STOPEVERY")) {
-    stop_every = strtoull (getenv ("X64E_STOPEVERY"), NULL, 0);
+    stop_every = (uint64_t)parse_uint (getenv ("X64E_STOPEVERY"));
     uc_hook_add (m->uc, &h, UC_HOOK_BLOCK, stop_block, m, 1, 0);
   }
 
@@ -377,11 +389,18 @@ machine_run (machine_t *m)
   uint64_t last_report = 0;
 
   pc = uc_x86_get_pc64 (m->uc);
-  if (!getenv ("X64E_NOKICK")) host_start_kick_timer (m->uc, getenv ("X64E_KICK_US") ? atoi (getenv ("X64E_KICK_US")) : 1000);
+  if (!getenv ("X64E_NOKICK")) {
+    host_start_kick_timer (m->uc, getenv ("X64E_KICK_US") ? parse_uint (getenv ("X64E_KICK_US")) : 1000);
+  }
   for (;;) {
     now = host_now_ns ();
     pit_tick (m, now);
     uart_poll_input (m);
+    host_poll_input (m);
+    if (m->reset_request || m->quit) {
+      host_log ("\nx64e: %s\n", m->quit ? "stopped" : "guest reset");
+      return;
+    }
 
     m->runs++;
     err = uc_emu_start (m->uc, pc, 0xfffffffffffff001ULL, 0, 0);

@@ -1531,13 +1531,84 @@ ScanX64Loaders (
   FreePool (Handles);
 }
 
+//
+// x64 Engine: the x86-64 PC (\EFI\X64ENGINE\X64ENGINE.EFI on the microSD card
+// or a USB drive), listed as the last boot device.
+//
+#define X64_ENGINE_PATH  L"\\EFI\\X64ENGINE\\X64ENGINE.EFI"
+
+STATIC EFI_HANDLE  mEngineFs;
+
+STATIC
+VOID
+ScanX64Engine (
+  VOID
+  )
+{
+  EFI_HANDLE                       *Handles;
+  UINTN                            Count;
+  UINTN                            Index;
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *Fs;
+  EFI_FILE_PROTOCOL                *Root;
+  EFI_FILE_PROTOCOL                *File;
+
+  mEngineFs = NULL;
+  if (EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &Count, &Handles))) {
+    return;
+  }
+
+  for (Index = 0; Index < Count && mEngineFs == NULL; Index++) {
+    if (EFI_ERROR (gBS->HandleProtocol (Handles[Index], &gEfiSimpleFileSystemProtocolGuid, (VOID **)&Fs)) ||
+        EFI_ERROR (Fs->OpenVolume (Fs, &Root)))
+    {
+      continue;
+    }
+
+    if (!EFI_ERROR (Root->Open (Root, &File, X64_ENGINE_PATH, EFI_FILE_MODE_READ, 0))) {
+      File->Close (File);
+      mEngineFs = Handles[Index];
+    }
+
+    Root->Close (Root);
+  }
+
+  FreePool (Handles);
+}
+
+STATIC
+VOID
+StartX64Engine (
+  VOID
+  )
+{
+  EFI_DEVICE_PATH_PROTOCOL  *Dp;
+  EFI_HANDLE                Image;
+  EFI_STATUS                Status;
+
+  Dp = FileDevicePath (mEngineFs, X64_ENGINE_PATH);
+  if (Dp == NULL) {
+    return;
+  }
+
+  gST->ConOut->ClearScreen (gST->ConOut);
+  gST->ConOut->EnableCursor (gST->ConOut, FALSE);
+  Status = gBS->LoadImage (TRUE, mImageHandle, Dp, NULL, 0, &Image);
+  if (!EFI_ERROR (Status)) {
+    Status = gBS->StartImage (Image, NULL, NULL);
+  }
+
+  FreePool (Dp);
+  gST->ConIn->Reset (gST->ConIn, FALSE);
+  Render ();
+}
+
 STATIC
 UINTN
 BmDevCount (
   VOID
   )
 {
-  return mBootCount + mX64Count;
+  return mBootCount + mX64Count + (mEngineFs != NULL ? 1 : 0);
 }
 
 STATIC
@@ -1546,7 +1617,15 @@ BmDevLabel (
   UINTN  I
   )
 {
-  return (I < mBootCount) ? mBoot[I].Desc : mX64Desc[I - mBootCount];
+  if (I < mBootCount) {
+    return mBoot[I].Desc;
+  }
+
+  if (I < mBootCount + mX64Count) {
+    return mX64Desc[I - mBootCount];
+  }
+
+  return L"x64 PC  \x00B7  run an x86-64 ISO";
 }
 
 STATIC
@@ -1727,7 +1806,8 @@ RunBootMenu (
   mBmSel          = 0;
   gST->ConIn->Reset (gST->ConIn, FALSE);   // drop the ESC presses that opened the menu
   ScanX64Loaders ();
-  DEBUG ((DEBUG_ERROR, "OpiSetup: boot menu (%u x64 loaders)\n", mX64Count));
+  ScanX64Engine ();
+  DEBUG ((DEBUG_ERROR, "OpiSetup: boot menu (%u x64 loaders, x64 Engine %a)\n", mX64Count, mEngineFs != NULL ? "yes" : "no"));
   for ( ; ; ) {
     Render ();
     Present ();
@@ -1753,8 +1833,10 @@ RunBootMenu (
     } else if (Key.UnicodeChar == CHAR_CARRIAGE_RETURN) {
       if (mBmSel < mBootCount) {
         BootOption (mBoot[mBmSel].Number);
-      } else if (mBmSel < BmDevCount ()) {
+      } else if (mBmSel < mBootCount + mX64Count) {
         BootX64 (mBmSel - mBootCount);
+      } else if (mBmSel < BmDevCount ()) {
+        StartX64Engine ();
       } else {
         StartFvApp (&mShellGuid);
       }
