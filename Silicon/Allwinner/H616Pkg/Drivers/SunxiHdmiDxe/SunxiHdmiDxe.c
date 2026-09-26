@@ -629,8 +629,8 @@ SunxiHdmiDxeInitialize (
   mHdmi.IoAddr     = HDMI_BASE;
   mHdmi.MpllCfg    = mH616Mpll;
   mHdmi.PhyCfg     = mH616Phy;
-  mHdmi.I2cClkHigh = 0xD8;   // ~100 kHz DDC from the 24 MHz isfr clock
-  mHdmi.I2cClkLow  = 0xFE;
+  mHdmi.I2cClkHigh = 96;     // 4.0 us @ 24 MHz isfr: 100 kHz standard mode
+  mHdmi.I2cClkLow  = 113;    // 4.7 us
 
   //
   // Bring up the HDMI block with a safe clock first so HPD / DDC work,
@@ -656,7 +656,7 @@ SunxiHdmiDxeInitialize (
 
   DwHdmiInit (&mHdmi);
   DwHdmiPhyInit (&mHdmi);
-  MicroSecondDelay (50000);
+  MicroSecondDelay (200000);    // let a freshly plugged monitor settle its DDC
 
   ChooseMode (&mTiming);
   if (!PickVideoClocks (mTiming.PixelClock, &Clk)) {

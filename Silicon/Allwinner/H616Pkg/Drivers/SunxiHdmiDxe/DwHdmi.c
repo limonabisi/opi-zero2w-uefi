@@ -419,18 +419,29 @@ DwHdmiReadEdid (
   OUT UINT8    *Buffer
   )
 {
-  UINT8  Shift;
-  UINTN  Try;
-  UINTN  N;
-  UINTN  Loops;
-  UINT8  Val;
-  BOOLEAN Err;
+  UINT8    Shift;
+  UINTN    Try;
+  UINTN    N;
+  UINTN    Loops;
+  UINT8    Val;
+  BOOLEAN  Err;
 
   Shift = (UINT8)((Block % 2) * 0x80);
 
-  HdmiWrite (Hdmi, Hdmi->I2cClkHigh, HDMI_I2CM_SS_SCL_HCNT_0_ADDR);
-  HdmiWrite (Hdmi, Hdmi->I2cClkLow, HDMI_I2CM_SS_SCL_LCNT_0_ADDR);
-  HdmiMod (Hdmi, HDMI_I2CM_DIV, HDMI_I2CM_DIV_FAST_STD_MODE, HDMI_I2CM_DIV_STD_MODE);
+  //
+  // I2C master setup as Linux dw-hdmi does it: soft reset, standard mode,
+  // SCL high/low counts for a 24 MHz isfr clock (4.0 us / 4.7 us).
+  //
+  HdmiWrite (Hdmi, 0x00, HDMI_I2CM_SOFTRSTZ);
+  MicroSecondDelay (100);
+  HdmiWrite (Hdmi, HDMI_I2CM_DIV_STD_MODE, HDMI_I2CM_DIV);
+  HdmiWrite (Hdmi, (UINT8)(Hdmi->I2cClkHigh >> 8), HDMI_I2CM_SS_SCL_HCNT_1_ADDR);
+  HdmiWrite (Hdmi, (UINT8)Hdmi->I2cClkHigh, HDMI_I2CM_SS_SCL_HCNT_0_ADDR);
+  HdmiWrite (Hdmi, (UINT8)(Hdmi->I2cClkLow >> 8), HDMI_I2CM_SS_SCL_LCNT_1_ADDR);
+  HdmiWrite (Hdmi, (UINT8)Hdmi->I2cClkLow, HDMI_I2CM_SS_SCL_LCNT_0_ADDR);
+  HdmiWrite (Hdmi, (UINT8) ~0x04, HDMI_I2CM_INT);
+  HdmiWrite (Hdmi, (UINT8) ~0x44, HDMI_I2CM_CTLINT);
+  HdmiWrite (Hdmi, 0x03, HDMI_IH_I2CM_STAT0);          // clear done / error
   HdmiWrite (Hdmi, HDMI_I2CM_SLAVE_DDC_ADDR, HDMI_I2CM_SLAVE);
   HdmiWrite (Hdmi, HDMI_I2CM_SEGADDR_DDC, HDMI_I2CM_SEGADDR);
   HdmiWrite (Hdmi, (UINT8)(Block >> 1), HDMI_I2CM_SEGPTR);
@@ -439,11 +450,12 @@ DwHdmiReadEdid (
     Err = FALSE;
     for (N = 0; N < 128; N++) {
       HdmiWrite (Hdmi, (UINT8)(Shift + N), HDMI_I2CM_ADDRESS);
-      HdmiWrite (Hdmi, (Block == 0) ? HDMI_I2CM_OP_RD8 : HDMI_I2CM_OP_RD8_EXT, HDMI_I2CM_OPERATION);
+      HdmiWrite (Hdmi, (Block < 2) ? HDMI_I2CM_OP_RD8 : HDMI_I2CM_OP_RD8_EXT, HDMI_I2CM_OPERATION);
 
-      for (Loops = 0; Loops < 100; Loops++) {
+      Val = 0;
+      for (Loops = 0; Loops < 200; Loops++) {
         Val = DwHdmiRead (Hdmi, HDMI_IH_I2CM_STAT0);
-        if ((Val & 0x2) != 0) {
+        if ((Val & 0x3) != 0) {
           HdmiWrite (Hdmi, Val, HDMI_IH_I2CM_STAT0);
           break;
         }
@@ -451,8 +463,18 @@ DwHdmiReadEdid (
         MicroSecondDelay (100);
       }
 
-      if (Loops == 100) {
-        HdmiMod (Hdmi, HDMI_I2CM_SOFTRSTZ, HDMI_I2CM_SOFTRSTZ_MASK, 0);
+      if ((Loops == 200) || ((Val & 0x1) != 0)) {
+        DEBUG ((
+          DEBUG_WARN,
+          "DwHdmi: EDID block %u byte %u: %a (I2CM stat 0x%02x), try %u\n",
+          (UINT32)Block,
+          (UINT32)N,
+          (Loops == 200) ? "timeout" : "NACK/error",
+          Val,
+          (UINT32)Try + 1
+          ));
+        HdmiWrite (Hdmi, 0x00, HDMI_I2CM_SOFTRSTZ);
+        MicroSecondDelay (1000);
         Err = TRUE;
         break;
       }
@@ -463,6 +485,8 @@ DwHdmiReadEdid (
     if (!Err) {
       return EFI_SUCCESS;
     }
+
+    MicroSecondDelay (20000);
   }
 
   return EFI_DEVICE_ERROR;
