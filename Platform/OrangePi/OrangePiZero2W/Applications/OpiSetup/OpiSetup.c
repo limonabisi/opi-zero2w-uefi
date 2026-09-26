@@ -316,7 +316,7 @@ Focusable (
   CONST ITEM  *It
   )
 {
-  return (It->Type != ItSection) && (It->Type != ItInfo);
+  return It->Type != ItSection;      // info rows too, so long pages can be scrolled
 }
 
 STATIC

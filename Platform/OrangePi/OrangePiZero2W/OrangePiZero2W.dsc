@@ -200,7 +200,7 @@
 
 [PcdsFixedAtBuild.common]
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"Orange Pi Zero 2W EDK2 port"
-  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.6.0-h618"
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.6.1-h618"
 
   gEfiMdePkgTokenSpaceGuid.PcdMaximumUnicodeStringLength|1000000
   gEfiMdePkgTokenSpaceGuid.PcdMaximumAsciiStringLength|1000000
@@ -316,6 +316,14 @@
   gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwSpareBase|0
 
   gEfiMdeModulePkgTokenSpaceGuid.PcdBootDiscoveryPolicy|2
+
+  # Text console (Shell, classic menu) uses the largest text mode that fits
+  # the HDMI mode (240x56 at 1080p) instead of a centred 80x25 box; 0/0 for
+  # the video resolution keeps the mode HDMI already set.
+  gEfiMdeModulePkgTokenSpaceGuid.PcdConOutColumn|0
+  gEfiMdeModulePkgTokenSpaceGuid.PcdConOutRow|0
+  gEfiMdeModulePkgTokenSpaceGuid.PcdVideoHorizontalResolution|0
+  gEfiMdeModulePkgTokenSpaceGuid.PcdVideoVerticalResolution|0
 
 [PcdsDynamicHii.common]
   # Boot timeout lives in the persistent "Timeout" variable, so the value set
