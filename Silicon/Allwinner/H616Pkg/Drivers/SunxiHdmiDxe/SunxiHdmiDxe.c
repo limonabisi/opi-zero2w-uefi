@@ -101,6 +101,8 @@
 //
 // HDMI
 //
+#define PIO_PI_CFG0            (0x0300B000 + 8 * 0x24 + 0x00)
+#define PIO_PI_DAT             (0x0300B000 + 8 * 0x24 + 0x10)
 #define HDMI_BASE              0x06000000
 #define HDMI_PHY_BASE          0x06010000
 #define HDMI_PHY_REXT_CTRL     (HDMI_PHY_BASE + 0x04)
@@ -467,8 +469,29 @@ ChooseMode (
   }
 
   if (EFI_ERROR (DwHdmiReadEdid (&mHdmi, 0, mEdid)) || (CompareMem (mEdid, Header, 8) != 0)) {
-    DEBUG ((DEBUG_WARN, "SunxiHdmi: EDID read failed, using 1280x720@60\n"));
-    return;
+    //
+    // Experiment: the H616 can also route the HDMI DDC through PI0 (HSCL)
+    // and PI1 (HSDA), pin function 5. If the dedicated DDC pads do not
+    // answer, look at the PI0/PI1 levels and retry with that routing.
+    //
+    UINT32  Cfg0;
+    UINT32  Lvl;
+
+    Cfg0 = MmioRead32 (PIO_PI_CFG0);
+    MmioWrite32 (PIO_PI_CFG0, Cfg0 & ~0xFFU);             // PI0/PI1 as inputs
+    MicroSecondDelay (10);
+    Lvl = MmioRead32 (PIO_PI_DAT) & 0x3;
+    DEBUG ((DEBUG_WARN, "SunxiHdmi: DDC via dedicated pads failed; PI0/PI1 levels %u/%u, trying PI0/PI1 (func 5)\n", Lvl & 1, (Lvl >> 1) & 1));
+
+    MmioWrite32 (PIO_PI_CFG0, (Cfg0 & ~0xFFU) | 0x55);    // PI0 = HSCL, PI1 = HSDA
+    MicroSecondDelay (1000);
+    if (EFI_ERROR (DwHdmiReadEdid (&mHdmi, 0, mEdid)) || (CompareMem (mEdid, Header, 8) != 0)) {
+      MmioWrite32 (PIO_PI_CFG0, Cfg0);                    // put the pins back
+      DEBUG ((DEBUG_WARN, "SunxiHdmi: EDID read failed, using 1280x720@60\n"));
+      return;
+    }
+
+    DEBUG ((DEBUG_WARN, "SunxiHdmi: EDID read OK through PI0/PI1\n"));
   }
 
   mEdidSize = 128;
