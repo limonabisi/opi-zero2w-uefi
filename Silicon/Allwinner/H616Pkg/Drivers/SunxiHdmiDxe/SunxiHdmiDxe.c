@@ -459,28 +459,17 @@ ChooseMode (
   DISPLAY_TIMING      Pref;
   VIDEO_CLOCKS        Clk;
 
-  STATIC CONST EFI_GUID  VarGuid = SUNXI_HDMI_DP_GUID;
-  UINT8                  Forced;
-  UINTN                  Size;
-
-  CopyMem (T, &mMode720p60, sizeof (*T));
+  //
+  // Default: 1920x1080@60, the highest mode this HDMI path drives. EDID is
+  // not readable on the Zero 2W; if a board does return EDID, its preferred
+  // timing is used instead (when the clock tree can produce it). The OS keeps
+  // whatever mode is set here.
+  //
+  CopyMem (T, &mMode1080p60, sizeof (*T));
   mEdidSize = 0;
 
-  //
-  // Manual override (EDID is not readable on the Zero 2W):
-  //   Shell> setvar HdmiMode -guid 3d4b6c0e-8a41-4f3a-9b0e-516d2a7c4419 -bs -nv =02
-  //   00 = automatic, 01 = 1280x720@60, 02 = 1920x1080@60
-  //
-  Size   = sizeof (Forced);
-  Forced = 0;
-  if (!EFI_ERROR (gRT->GetVariable (L"HdmiMode", (EFI_GUID *)&VarGuid, NULL, &Size, &Forced)) && (Forced != 0)) {
-    CopyMem (T, (Forced == 2) ? &mMode1080p60 : &mMode720p60, sizeof (*T));
-    DEBUG ((DEBUG_INFO, "SunxiHdmi: HdmiMode variable forces %ux%u\n", T->HActive, T->VActive));
-    return;
-  }
-
   if (!DwHdmiHotPlugDetected (&mHdmi)) {
-    DEBUG ((DEBUG_WARN, "SunxiHdmi: no hot-plug signal, using 1280x720@60\n"));
+    DEBUG ((DEBUG_WARN, "SunxiHdmi: no hot-plug signal, using 1920x1080@60\n"));
     return;
   }
 
@@ -489,7 +478,6 @@ ChooseMode (
     // On the Orange Pi Zero 2W the DDC master never gets a clock edge back
     // (SCL held low / not routed), so EDID is not available. Rerouting
     // DDC to PI0/PI1 was tried: those are plain header pins (NACK).
-    // The mode can be chosen with the "HdmiMode" variable instead.
     //
     DEBUG ((DEBUG_WARN, "SunxiHdmi: EDID not available (DDC does not respond)\n"));
     return;
@@ -510,7 +498,7 @@ ChooseMode (
     ));
 
   if (!ParseDtd (&mEdid[0x36], &Pref)) {
-    DEBUG ((DEBUG_WARN, "SunxiHdmi: no usable preferred timing, using 720p\n"));
+    DEBUG ((DEBUG_WARN, "SunxiHdmi: no usable preferred timing, using 1080p\n"));
     return;
   }
 
@@ -531,7 +519,7 @@ ChooseMode (
   if (PickVideoClocks (Pref.PixelClock, &Clk)) {
     CopyMem (T, &Pref, sizeof (*T));
   } else {
-    DEBUG ((DEBUG_WARN, "SunxiHdmi: cannot synthesise %u Hz, using 720p\n", Pref.PixelClock));
+    DEBUG ((DEBUG_WARN, "SunxiHdmi: cannot synthesise %u Hz, using 1080p\n", Pref.PixelClock));
   }
 }
 

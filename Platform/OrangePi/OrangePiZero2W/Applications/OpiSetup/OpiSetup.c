@@ -288,14 +288,6 @@ BuildPage (
       break;
 
     case PAGE_CONFIG:
-      Add (ItSection, S (StrDisplaySec));
-      It             = Add (ItChoice, S (StrHdmiRes));
-      It->Desc       = S (StrHdmiNote);
-      It->Choice     = &mHdmiMode;
-      It->Options[0] = S (StrAuto);
-      It->Options[1] = L"1280 x 720  ·  60 Hz";
-      It->Options[2] = L"1920 x 1080  ·  60 Hz";
-      It->OptCount   = 3;
       Add (ItSection, S (StrGeneral));
       AddNumber (S (StrTimeout), &mTimeout, 0, 30, S (StrSeconds));
       Add (ItSection, S (StrCpuSec));
@@ -560,8 +552,6 @@ SaveSettings (
   UINTN     I;
   EFI_TIME  Now;
 
-  B = (UINT8)mHdmiMode;
-  gRT->SetVariable (L"HdmiMode", &mHdmiVarGuid, EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS, 1, &B);
 
   T = (UINT16)mTimeout;
   gRT->SetVariable (

@@ -19,7 +19,7 @@ Feature status: **[docs/STATUS.md](docs/STATUS.md)**
 ## Highlights
 
 - Graphical setup (**F2**) and boot menu (**ESC**)
-- HDMI output at 720p or 1080p (UEFI GOP)
+- HDMI output at 1920x1080 (UEFI GOP)
 - USB host port with EHCI + OHCI: keyboards, hubs, USB drives, boot from USB
 - microSD read/write, FAT and Ext4
 - Settings kept on the microSD card (UEFI variables), real-time clock
@@ -83,7 +83,7 @@ setup screenshots were taken.
 
 ## Known limitations
 
-- HDMI EDID cannot be read on this board, the resolution is chosen in setup.
+- HDMI EDID cannot be read on this board, the output is always 1920x1080.
 - Only the USB host port works, the OTG port on the power connector has no driver.
 - No Wi-Fi, Bluetooth or network boot.
 - Linux needs a Device Tree boot mode, which is not done yet (ACPI only for now).

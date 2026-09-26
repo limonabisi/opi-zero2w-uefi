@@ -7,7 +7,7 @@
 State: Active
 Codename: opizero2w
 SoC: Allwinner H618 (4x Cortex-A53, 1 GB LPDDR4)
-Version: 0.8.2-h618
+Version: 0.8.3-h618
 
 Contributors: limonabisi
 
@@ -17,8 +17,8 @@ Legend: ✅ Working · ⚠️ Partially working · ❌ Not working · ❓ Not te
 
 | Feature | Description | State |
 |---|---|---|
-| Display (HDMI) | 720p / 1080p, chosen in setup | ✅ |
-| HDMI EDID | DDC does not respond, "Auto" falls back to 720p | ⚠️ |
+| Display (HDMI) | 1920x1080 | ✅ |
+| HDMI EDID | DDC does not respond, fixed 1920x1080 | ⚠️ |
 | microSD | Read / write | ✅ |
 | USB Host Mode | USB1 port, EHCI + OHCI, with and without hub | ✅ |
 | USB Device Mode | USB0 (OTG on the power port), no driver | ❌ |
