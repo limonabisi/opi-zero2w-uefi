@@ -33,6 +33,7 @@ void     host_log (const char *fmt, ...);
 void    *host_alloc (size_t size);             /* zeroed, page aligned   */
 struct machine;
 void     host_poll_input (struct machine *m);   /* keyboard etc.         */
+void     host_progress (const char *what, unsigned percent);
 
 /* ------------------------------------------------------------ irq ---- */
 typedef struct {
@@ -161,6 +162,7 @@ void     host_free (void *p, size_t size);
 int      iso_open (iso_t *iso, void *disk);
 int      iso_lookup (iso_t *iso, const char *path, uint32_t *lba, uint32_t *size);
 uint8_t *iso_read_file (iso_t *iso, const char *path, size_t *size);
+int      iso_read_into (iso_t *iso, const char *path, uint8_t *dst, size_t max, size_t *size, const char *what);
 int      bootcfg_scan (iso_t *iso, bootlist_t *bl);
 int      iso_boot (machine_t *m, iso_t *iso, bootent_t *e, const char *extra_args);
 
@@ -193,6 +195,7 @@ struct machine {
   uint8_t     cmos_index;
   uint8_t     cmos[128];
   uint64_t    boot_ns;
+  uint64_t    initrd_addr;
   /* statistics */
   uint64_t    io_exits, irqs, runs;
 };

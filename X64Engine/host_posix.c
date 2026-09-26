@@ -47,6 +47,13 @@ host_console_read (void)
 }
 
 void
+host_progress (const char *what, unsigned percent)
+{
+  (void)what;
+  (void)percent;
+}
+
+void
 host_poll_input (machine_t *m)
 {
   (void)m;

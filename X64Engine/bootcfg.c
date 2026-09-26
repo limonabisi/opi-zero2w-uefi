@@ -430,44 +430,48 @@ bootcfg_scan (iso_t *iso, bootlist_t *bl)
 int
 iso_boot (machine_t *m, iso_t *iso, bootent_t *e, const char *extra_args)
 {
-  uint8_t *k, *parts[4] = { 0 }, *initrd = NULL;
-  size_t   ks, psz[4] = { 0 }, total = 0, off = 0;
+  uint8_t *k;
+  size_t   ks, psz, total = 0, off = 0;
+  uint32_t lba, sz;
   char     cmdline[1024];
   int      i, r;
 
-  k = iso_read_file (iso, e->kernel, &ks);
-  if (!k) {
+  /* kernel: small, read into a temporary buffer */
+  if (iso_lookup (iso, e->kernel, &lba, &sz) != 0 || (k = host_alloc (sz + 4096)) == NULL ||
+      iso_read_into (iso, e->kernel, k, sz, &ks, "Loading the kernel")) {
     host_log ("x64e: kernel %s not found on the ISO\n", e->kernel);
     return -1;
   }
 
+  /* initrds: sizes first, then straight into guest RAM */
   for (i = 0; i < e->ninitrd; i++) {
-    parts[i] = iso_read_file (iso, e->initrd[i], &psz[i]);
-    if (!parts[i]) {
+    if (iso_lookup (iso, e->initrd[i], &lba, &sz) != 0) {
       host_log ("x64e: initrd %s not found on the ISO\n", e->initrd[i]);
+      host_free (k, ks + 4096);
       return -1;
     }
 
-    total += (psz[i] + 3) & ~(size_t)3;
-  }
-
-  if (total) {
-    initrd = host_alloc (total);
-    for (i = 0; i < e->ninitrd; i++) {
-      memcpy (initrd + off, parts[i], psz[i]);
-      off += (psz[i] + 3) & ~(size_t)3;
-      host_free (parts[i], psz[i] + 2049);
-    }
+    total += ((size_t)sz + 3) & ~(size_t)3;
   }
 
   snprintf (cmdline, sizeof (cmdline), "%s %s", e->args, extra_args ? extra_args : "");
   host_log ("x64e: booting \"%s\": %s (%u KB) initrd %u KB\nx64e: cmdline: %s\n", e->title,
             e->kernel, (unsigned)(ks / 1024), (unsigned)(total / 1024), cmdline);
-  r = linux_boot_setup (m, k, ks, initrd, total, cmdline);
-  host_free (k, ks + 2049);
-  if (initrd) {
-    host_free (initrd, total);
+  r = linux_boot_setup (m, k, ks, NULL, total, cmdline);
+  host_free (k, ks + 4096);
+  if (r) {
+    return r;
   }
 
-  return r;
+  for (i = 0; i < e->ninitrd; i++) {
+    if (iso_read_into (iso, e->initrd[i], m->ram + m->initrd_addr + off, total - off, &psz,
+                       "Loading the initrd")) {
+      host_log ("x64e: reading %s failed\n", e->initrd[i]);
+      return -1;
+    }
+
+    off += (psz + 3) & ~(size_t)3;
+  }
+
+  return 0;
 }

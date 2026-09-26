@@ -197,6 +197,55 @@ host_poll_input (machine_t *m)
   }
 }
 
+/* ------------------------------------------------------------ status */
+void
+host_progress (const char *what, unsigned percent)
+{
+  static unsigned last = 1000;
+
+  if (percent == last) {
+    return;
+  }
+
+  last = percent;
+  Print (L"\r  %a... %3u%%   ", what, percent);
+  if (percent == 100) {
+    Print (L"\n");
+    last = 1000;
+  }
+}
+
+/* free conventional memory in MB */
+static UINT64
+free_memory_mb (void)
+{
+  EFI_MEMORY_DESCRIPTOR *map = NULL, *d;
+  UINTN                 size = 0, key, dsize;
+  UINT32                ver;
+  UINT64                pages = 0;
+  EFI_STATUS            st;
+
+  st = gBS->GetMemoryMap (&size, NULL, &key, &dsize, &ver);
+  if (st != EFI_BUFFER_TOO_SMALL) {
+    return 0;
+  }
+
+  size += 8 * dsize;
+  map   = AllocatePool (size);
+  if (map == NULL || EFI_ERROR (gBS->GetMemoryMap (&size, map, &key, &dsize, &ver))) {
+    return 0;
+  }
+
+  for (d = map; (UINT8 *)d < (UINT8 *)map + size; d = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)d + dsize)) {
+    if (d->Type == EfiConventionalMemory) {
+      pages += d->NumberOfPages;
+    }
+  }
+
+  FreePool (map);
+  return pages * EFI_PAGE_SIZE / (1024 * 1024);
+}
+
 /* ---------------------------------------------------------- memory */
 void *
 host_alloc (size_t size)
@@ -495,7 +544,7 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   iso_t                        iso;
   INTN                         src, ent;
   UINTN                        i;
-  static const uint64_t        ram_try[] = { 512, 448, 384, 320, 256 };
+  UINT64                       free_mb, guest_mb;
 
   mT0 = (uint64_t)efi_get_timer_ns ();
   gBS->SetWatchdogTimer (0, 0, 0, NULL);
@@ -540,14 +589,19 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   gST->ConOut->ClearScreen (gST->ConOut);
   Print (L"\n  Starting the x86-64 machine...\n");
 
-  for (i = 0; i < sizeof (ram_try) / sizeof (ram_try[0]); i++) {
-    if (machine_init (&m, ram_try[i]) == 0) {
-      break;
-    }
-  }
-
-  if (i == sizeof (ram_try) / sizeof (ram_try[0])) {
-    Print (L"  Not enough memory for the x86 machine.\n");
+  /*
+   * Guest RAM: what is free minus the translation cache (100 MB), the
+   * kernel image being loaded and a reserve for the firmware's own drivers
+   * (USB DMA buffers etc.), at most 512 MB.
+   */
+  free_mb  = free_memory_mb ();
+  guest_mb = free_mb > 100 + 32 + 128 + 128 ? free_mb - 100 - 32 - 128 : 128;
+  guest_mb = guest_mb > 512 ? 512 : guest_mb & ~31ULL;
+  host_log ("x64e: %lu MB free, %lu MB for the x86 machine\n", free_mb, guest_mb);
+  Print (L"  Memory: %lu MB free, %lu MB for the x86 machine\n", free_mb, guest_mb);
+  if (machine_init (&m, guest_mb) != 0) {
+    Print (L"  Not enough memory for the x86 machine. Press any key.\n");
+    gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &i);
     return EFI_OUT_OF_RESOURCES;
   }
 
@@ -565,7 +619,7 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
     }
   }
 
-  if (iso_boot (&m, &iso, &bl.e[ent], "console=ttyS0,115200 console=tty0 nolapic noapic")) {
+  if (iso_boot (&m, &iso, &bl.e[ent], "console=ttyS0,115200 console=tty0 loglevel=6 nolapic noapic")) {
     Print (L"  Could not load the kernel from the ISO. Press any key.\n");
     gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &i);
     return EFI_LOAD_ERROR;

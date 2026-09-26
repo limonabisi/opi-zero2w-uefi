@@ -1,0 +1,36 @@
+diff --git a/MdeModulePkg/Bus/Pci/EhciDxe/EhciSched.c b/MdeModulePkg/Bus/Pci/EhciDxe/EhciSched.c
+index 59bbe9f..cb72045 100644
+--- a/MdeModulePkg/Bus/Pci/EhciDxe/EhciSched.c
++++ b/MdeModulePkg/Bus/Pci/EhciDxe/EhciSched.c
+@@ -350,6 +350,7 @@ EhcUnlinkQhFromAsync (
+   EHC_QH                *Head;
+   EFI_STATUS            Status;
+   EFI_PHYSICAL_ADDRESS  PciAddr;
++  UINTN                 Index;
+ 
+   ASSERT (Ehc->ReclaimHead->NextQh == Qh);
+ 
+@@ -372,7 +373,22 @@ EhcUnlinkQhFromAsync (
+   Status = EhcSetAndWaitDoorBell (Ehc, EHC_GENERIC_TIMEOUT);
+ 
+   if (EFI_ERROR (Status)) {
+-    DEBUG ((DEBUG_ERROR, "EhcUnlinkQhFromAsync: Failed to synchronize with doorbell\n"));
++    //
++    // Some controllers (Allwinner H616/H618) occasionally never raise the
++    // async advance interrupt. The QH may then still be cached by the host
++    // controller and must not be freed yet. Stop the asynchronous schedule,
++    // which guarantees the controller holds no QH any more, and restart it.
++    //
++    DEBUG ((DEBUG_WARN, "EhcUnlinkQhFromAsync: no doorbell, cycling the async schedule\n"));
++    EhcClearOpRegBit (Ehc, EHC_USBCMD_OFFSET, USBCMD_ENABLE_ASYNC);
++    for (Index = 0; Index < 20 && (EhcReadOpReg (Ehc, EHC_USBSTS_OFFSET) & USBSTS_ASYNC_ENABLED) != 0; Index++) {
++      gBS->Stall (EHC_SYNC_POLL_INTERVAL);
++    }
++
++    EhcSetOpRegBit (Ehc, EHC_USBCMD_OFFSET, USBCMD_ENABLE_ASYNC);
++    for (Index = 0; Index < 20 && (EhcReadOpReg (Ehc, EHC_USBSTS_OFFSET) & USBSTS_ASYNC_ENABLED) == 0; Index++) {
++      gBS->Stall (EHC_SYNC_POLL_INTERVAL);
++    }
+   }
+ }
+ 

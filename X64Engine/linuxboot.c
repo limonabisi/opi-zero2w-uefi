@@ -81,7 +81,7 @@ linux_boot_setup (machine_t *m, const uint8_t *k, size_t ksize,
   memcpy (m->ram + load, k + pm_off, pm_size);
   wr32 (bp + 0x214, (uint32_t)load);                     /* code32_start */
 
-  if (initrd && isize) {
+  if (isize) {
     initrd_max  = rd32 (k + 0x22c);
     if (initrd_max == 0 || initrd_max >= m->ram_size) {
       initrd_max = m->ram_size - 1;
@@ -93,7 +93,11 @@ linux_boot_setup (machine_t *m, const uint8_t *k, size_t ksize,
       return -1;
     }
 
-    memcpy (m->ram + initrd_addr, initrd, isize);
+    if (initrd) {
+      memcpy (m->ram + initrd_addr, initrd, isize);
+    }
+
+    m->initrd_addr = initrd_addr;     /* initrd == NULL: the caller fills it */
     wr32 (bp + 0x218, (uint32_t)initrd_addr);
     wr32 (bp + 0x21c, (uint32_t)isize);
   }

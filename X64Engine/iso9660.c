@@ -191,3 +191,28 @@ iso_read_file (iso_t *iso, const char *path, size_t *size)
   *size   = sz;
   return buf;
 }
+
+/* read a whole file into dst in 1 MB steps, reporting progress */
+int
+iso_read_into (iso_t *iso, const char *path, uint8_t *dst, size_t max, size_t *size, const char *what)
+{
+  uint32_t lba, sz, done = 0;
+
+  if (iso_lookup (iso, path, &lba, &sz) != 0 || sz > max) {
+    return -1;
+  }
+
+  while (done < sz) {
+    uint32_t chunk = sz - done > 0x100000 ? 0x100000 : sz - done;
+
+    if (host_disk_read (iso->disk, (uint64_t)lba * SECTOR + done, dst + done, chunk)) {
+      return -1;
+    }
+
+    done += chunk;
+    host_progress (what, (unsigned)((uint64_t)done * 100 / sz));
+  }
+
+  *size = sz;
+  return 0;
+}
