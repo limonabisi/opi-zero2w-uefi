@@ -6,8 +6,12 @@ environment with a graphical setup, USB and HDMI support, Secure Boot and ACPI
 tables for Windows on ARM.
 
 <p>
+  <img src="docs/images/boot-screen.png" width="49%" alt="Boot screen: ESC boot menu, F2 setup">
   <img src="docs/images/setup-main.png" width="49%" alt="Setup, Main page">
+</p>
+<p>
   <img src="docs/images/boot-menu.png" width="49%" alt="Boot menu">
+  <img src="docs/images/setup-security.png" width="49%" alt="Setup, Security page">
 </p>
 
 Feature status: **[docs/STATUS.md](docs/STATUS.md)**
@@ -85,15 +89,11 @@ setup screenshots were taken.
 - Linux needs a Device Tree boot mode, which is not done yet (ACPI only for now).
 - Windows cannot use the microSD card (the controller is not SDHCI); install it on a USB drive.
 
+## Contributors
+
+- limonabisi
+
 ## License
 
 BSD-2-Clause-Patent, like EDK2. Third-party parts are listed in [THIRD-PARTY.md](THIRD-PARTY.md).
 
----
-
-### Türkçe
-
-Orange Pi Zero 2W için EDK2 tabanlı UEFI firmware. Releases'tan zip'i indir,
-`opi-zero2w-edk2-sd.img` dosyasını balenaEtcher/Rufus ile SD karta yaz. Açılışta
-**F2** kurulum ekranı, **ESC** açılış menüsü. Setup'ta dil Türkçe seçilebilir.
-Özellik durumu: [docs/STATUS.md](docs/STATUS.md).

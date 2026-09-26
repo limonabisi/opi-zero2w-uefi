@@ -1,13 +1,11 @@
 diff --git a/ArmPkg/Library/PlatformBootManagerLib/PlatformBm.c b/ArmPkg/Library/PlatformBootManagerLib/PlatformBm.c
-index ea093bb..6eb5cd5 100644
+index ea093bb..a21339b 100644
 --- a/ArmPkg/Library/PlatformBootManagerLib/PlatformBm.c
 +++ b/ArmPkg/Library/PlatformBootManagerLib/PlatformBm.c
-@@ -16,7 +16,10 @@
- #include <Library/CapsuleLib.h>
+@@ -17,6 +17,9 @@
  #include <Library/DevicePathLib.h>
  #include <Library/HobLib.h>
--#include <Library/PcdLib.h>
-+#include <Library/PcdLib.h>
+ #include <Library/PcdLib.h>
 +#include <Library/PrintLib.h>
 +#include <Library/BaseMemoryLib.h>
 +#include <Library/MemoryAllocationLib.h>
@@ -135,7 +133,30 @@ index ea093bb..6eb5cd5 100644
  }
  
  //
-@@ -1089,7 +1158,7 @@ PlatformBootManagerWaitCallback (
+@@ -1009,7 +1078,10 @@ PlatformBootManagerAfterConsole (
+   // Show the splash screen.
+   //
+   Status = BootLogoEnableLogo ();
+-  if (EFI_ERROR (Status)) {
++  if (EFI_ERROR (Status) &&
++      EFI_ERROR (gBS->HandleProtocol (gST->ConsoleOutHandle, &gEfiGraphicsOutputProtocolGuid, (VOID **)&GraphicsOutput)))
++  {
++    // text-only console: the graphical screen shows logo, prompt and progress
+     if (FirmwareVerLength > 0) {
+       Print (
+         VERSION_STRING_PREFIX L"%s\n",
+@@ -1017,8 +1089,8 @@ PlatformBootManagerAfterConsole (
+         );
+     }
+ 
+-    Print (L"Press ESCAPE for boot options ");
+-  } else if (FirmwareVerLength > 0) {
++    Print (L"ESC: Boot Menu   F2: Setup ");
++  } else if (!EFI_ERROR (Status) && (FirmwareVerLength > 0)) {
+     Status = gBS->HandleProtocol (
+                     gST->ConsoleOutHandle,
+                     &gEfiGraphicsOutputProtocolGuid,
+@@ -1089,7 +1161,7 @@ PlatformBootManagerWaitCallback (
    Status = BootLogoUpdateProgress (
               White.Pixel,
               Black.Pixel,

@@ -7,9 +7,9 @@
 State: Active
 Codename: opizero2w
 SoC: Allwinner H618 (4x Cortex-A53, 1 GB LPDDR4)
-Version: 0.8.0-h618
+Version: 0.8.1-h618
 
-Contributors: lsmonabisi
+Contributors: limonabisi
 
 Legend: ✅ Working · ⚠️ Partially working · ❌ Not working · ❓ Not tested yet
 
