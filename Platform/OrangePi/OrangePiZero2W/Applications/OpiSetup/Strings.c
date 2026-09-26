@@ -6,7 +6,7 @@
 
 #include "OpiSetup.h"
 
-UINTN  gLanguage = 1;
+UINTN  gLanguage = 1;               // English (the Turkish column is kept but not selectable)
 
 STATIC CONST CHAR16  *mStrings[StrCount][2] = {
   [StrSetup]            = { L"UEFI Kurulum",                              L"UEFI Setup"                               },
@@ -17,7 +17,7 @@ STATIC CONST CHAR16  *mStrings[StrCount][2] = {
   [StrStartup]          = { L"Başlangıç",                                 L"Startup"                                  },
   [StrExit]             = { L"Çıkış",                                     L"Restart"                                  },
   [StrMainSub]          = { L"Sistem bilgileri",                          L"System information"                       },
-  [StrConfigSub]        = { L"Ekran, dil ve genel ayarlar",               L"Display, language and general settings"   },
+  [StrConfigSub]        = { L"Ekran, dil ve genel ayarlar",               L"Display, boot and processor settings"   },
   [StrDateTimeSub]      = { L"Kartın saati (pil yok: elektrik kesilince sıfırlanır)", L"Board clock (no battery: resets on power loss)" },
   [StrSecuritySub]      = { L"Güvenlik özellikleri",                      L"Security features"                        },
   [StrStartupSub]       = { L"Açılış sırası ve açılış aygıtı",            L"Boot order and boot device"               },

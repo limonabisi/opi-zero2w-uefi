@@ -297,11 +297,6 @@ BuildPage (
       It->Options[2] = L"1920 x 1080  ·  60 Hz";
       It->OptCount   = 3;
       Add (ItSection, S (StrGeneral));
-      It             = Add (ItChoice, S (StrLanguage));
-      It->Choice     = &mLang;
-      It->Options[0] = S (StrTurkish);
-      It->Options[1] = S (StrEnglish);
-      It->OptCount   = 2;
       AddNumber (S (StrTimeout), &mTimeout, 0, 30, S (StrSeconds));
       Add (ItSection, S (StrCpuSec));
       UnicodeSPrint (mCpuMaxLabel, sizeof (mCpuMaxLabel), L"%s  ·  %u MHz", S (StrCpuMax), (mCpu != NULL) ? mCpu->MaxMhz : 1512);
@@ -452,10 +447,7 @@ LoadSettings (
   gRT->GetVariable (L"Timeout", &gEfiGlobalVariableGuid, NULL, &Size, &T);
   mTimeout = (T > 30) ? 30 : T;
 
-  Size = 1;
-  B    = 1;                                           // English unless set
-  gRT->GetVariable (L"Language", &mSetupVarGuid, NULL, &Size, &B);
-  mLang     = B & 1;
+  mLang     = 1;                                      // English only
   gLanguage = mLang;
 
   if (!EFI_ERROR (gRT->GetTime (&Now, NULL))) {
@@ -489,6 +481,10 @@ LoadSettings (
   // Boot options, in BootOrder order. Only active, visible ones can be
   // reordered here; the others keep their place at the end of BootOrder.
   //
+  // pick up USB drives plugged in after BDS scanned the devices
+  EfiBootManagerConnectAll ();
+  EfiBootManagerRefreshAllBootOption ();
+
   mBootCount   = 0;
   mHiddenCount = 0;
   Opts         = EfiBootManagerGetLoadOptions (&OptCount, LoadOptionTypeBoot);
@@ -508,44 +504,6 @@ LoadSettings (
   }
 
   EfiBootManagerFreeLoadOptions (Opts, OptCount);
-
-  //
-  // Date/time: written only when edited, so saving other settings does not
-  // move the clock back to the moment setup was opened.
-  //
-  if (TimeChanged () && !EFI_ERROR (gRT->GetTime (&Now, NULL))) {
-    STATIC CONST UINT8  Days[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    INT32               Max;
-
-    Max = Days[mMonth - 1];
-    if ((mMonth == 2) && ((mYear % 4) == 0)) {
-      Max = 29;
-    }
-
-    Now.Year   = (UINT16)mYear;
-    Now.Month  = (UINT8)mMonth;
-    Now.Day    = (UINT8)MIN (mDay, Max);
-    Now.Hour   = (UINT8)mHour;
-    Now.Minute = (UINT8)mMinute;
-    Now.Second = 0;
-    Now.Nanosecond = 0;
-    gRT->SetTime (&Now);
-  }
-
-  mTimeOrig[0] = mYear;
-  mTimeOrig[1] = mMonth;
-  mTimeOrig[2] = mDay;
-  mTimeOrig[3] = mHour;
-  mTimeOrig[4] = mMinute;
-
-  if (mSecureBoot != mSecureBootOrig) {
-    if (EFI_ERROR ((mSecureBoot != 0) ? SbEnable () : SbDisable ())) {
-      Dialog (S (StrSecureBoot), S (StrSbFailed), S (StrOk), NULL);
-      mSecureBoot = SbPkEnrolled () ? 1 : 0;
-    }
-
-    mSecureBootOrig = mSecureBoot;
-  }
 
   mHdmiModeOrig = mHdmiMode;
   mTimeoutOrig  = mTimeout;
@@ -618,8 +576,6 @@ SaveSettings (
   gRT->SetVariable (L"CpuSpeed", &mSetupVarGuid, EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS, 1, &B);
   mCpuSpeedOrig = mCpuSpeed;
 
-  B = (UINT8)mLang;
-  gRT->SetVariable (L"Language", &mSetupVarGuid, EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS, 1, &B);
 
   if (BootOrderChanged ()) {
     Order = AllocatePool ((mBootCount + mHiddenCount) * sizeof (UINT16));

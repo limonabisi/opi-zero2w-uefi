@@ -18,7 +18,7 @@ Feature status: **[docs/STATUS.md](docs/STATUS.md)**
 
 ## Highlights
 
-- Graphical setup (**F2**) and boot menu (**ESC**), English and Turkish
+- Graphical setup (**F2**) and boot menu (**ESC**)
 - HDMI output at 720p or 1080p (UEFI GOP)
 - USB host port with EHCI + OHCI: keyboards, hubs, USB drives, boot from USB
 - microSD read/write, FAT and Ext4

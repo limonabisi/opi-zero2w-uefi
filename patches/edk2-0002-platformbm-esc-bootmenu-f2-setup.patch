@@ -1,8 +1,8 @@
 diff --git a/ArmPkg/Library/PlatformBootManagerLib/PlatformBm.c b/ArmPkg/Library/PlatformBootManagerLib/PlatformBm.c
-index ea093bb..a21339b 100644
+index ea093bb..64b8b03 100644
 --- a/ArmPkg/Library/PlatformBootManagerLib/PlatformBm.c
 +++ b/ArmPkg/Library/PlatformBootManagerLib/PlatformBm.c
-@@ -17,6 +17,9 @@
+@@ -17,9 +17,13 @@
  #include <Library/DevicePathLib.h>
  #include <Library/HobLib.h>
  #include <Library/PcdLib.h>
@@ -12,7 +12,11 @@ index ea093bb..a21339b 100644
  #include <Library/UefiBootManagerLib.h>
  #include <Library/UefiLib.h>
  #include <Library/UefiRuntimeServicesTableLib.h>
-@@ -645,6 +648,51 @@ GetPlatformOptions (
++#include <Protocol/BlockIo.h>
+ #include <Protocol/BootManagerPolicy.h>
+ #include <Protocol/DevicePath.h>
+ #include <Protocol/EsrtManagement.h>
+@@ -645,6 +649,51 @@ GetPlatformOptions (
    FreePool (BootKeys);
  }
  
@@ -64,7 +68,7 @@ index ea093bb..a21339b 100644
  STATIC
  VOID
  PlatformRegisterOptionsAndKeys (
-@@ -668,7 +716,8 @@ PlatformRegisterOptionsAndKeys (
+@@ -668,7 +717,8 @@ PlatformRegisterOptionsAndKeys (
    ASSERT_EFI_ERROR (Status);
  
    //
@@ -74,7 +78,7 @@ index ea093bb..a21339b 100644
    //
    F2.ScanCode     = SCAN_F2;
    F2.UnicodeChar  = CHAR_NULL;
-@@ -676,22 +725,42 @@ PlatformRegisterOptionsAndKeys (
+@@ -676,22 +726,98 @@ PlatformRegisterOptionsAndKeys (
    Esc.UnicodeChar = CHAR_NULL;
    Status          = EfiBootManagerGetBootManagerMenu (&BootOption);
    ASSERT_EFI_ERROR (Status);
@@ -130,33 +134,135 @@ index ea093bb..a21339b 100644
 +      EfiBootManagerFreeLoadOption (&MenuOption);
 +    }
 +  }
++}
++
++/**
++  USB devices behind a hub (and slow USB sticks) show up a little after the
++  first connect pass. Give the USB bus up to ~2.5 s to settle (until the
++  number of block devices and text inputs stops changing), then connect and
++  refresh the boot options again, so the hot keys work from the start of the
++  timeout and every USB drive gets a boot option.
++**/
++STATIC
++UINTN
++PlatformCountHandles (
++  VOID
++  )
++{
++  EFI_HANDLE  *Handles;
++  UINTN       Count;
++  UINTN       Total;
++
++  Total = 0;
++  if (!EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiBlockIoProtocolGuid, NULL, &Count, &Handles))) {
++    Total += Count;
++    FreePool (Handles);
++  }
++
++  if (!EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleTextInProtocolGuid, NULL, &Count, &Handles))) {
++    Total += Count;
++    FreePool (Handles);
++  }
++
++  return Total;
++}
++
++STATIC
++VOID
++PlatformWaitForUsb (
++  VOID
++  )
++{
++  UINTN  Last;
++  UINTN  Now;
++  UINTN  Stable;
++  UINTN  Round;
++
++  Last   = PlatformCountHandles ();
++  Stable = 0;
++  for (Round = 0; Round < 10 && Stable < 2; Round++) {
++    gBS->Stall (250 * 1000);
++    EfiBootManagerConnectAll ();
++    Now = PlatformCountHandles ();
++    Stable = (Now == Last) ? Stable + 1 : 0;
++    Last   = Now;
++  }
++
++  EfiBootManagerRefreshAllBootOption ();
++  DEBUG ((DEBUG_INFO, "PlatformBm: USB settled after %u ms (%u handles)\n", Round * 250, Last));
  }
  
  //
-@@ -1009,7 +1078,10 @@ PlatformBootManagerAfterConsole (
+@@ -1008,8 +1134,14 @@ PlatformBootManagerAfterConsole (
+   //
    // Show the splash screen.
    //
-   Status = BootLogoEnableLogo ();
--  if (EFI_ERROR (Status)) {
-+  if (EFI_ERROR (Status) &&
-+      EFI_ERROR (gBS->HandleProtocol (gST->ConsoleOutHandle, &gEfiGraphicsOutputProtocolGuid, (VOID **)&GraphicsOutput)))
-+  {
-+    // text-only console: the graphical screen shows logo, prompt and progress
+-  Status = BootLogoEnableLogo ();
++  BootLogoEnableLogo ();
++  Status = gBS->HandleProtocol (
++                  gST->ConsoleOutHandle,
++                  &gEfiGraphicsOutputProtocolGuid,
++                  (VOID **)&GraphicsOutput
++                  );
+   if (EFI_ERROR (Status)) {
++    // text-only console
      if (FirmwareVerLength > 0) {
        Print (
          VERSION_STRING_PREFIX L"%s\n",
-@@ -1017,8 +1089,8 @@ PlatformBootManagerAfterConsole (
+@@ -1017,28 +1149,23 @@ PlatformBootManagerAfterConsole (
          );
      }
  
 -    Print (L"Press ESCAPE for boot options ");
--  } else if (FirmwareVerLength > 0) {
 +    Print (L"ESC: Boot Menu   F2: Setup ");
-+  } else if (!EFI_ERROR (Status) && (FirmwareVerLength > 0)) {
-     Status = gBS->HandleProtocol (
-                     gST->ConsoleOutHandle,
-                     &gEfiGraphicsOutputProtocolGuid,
-@@ -1089,7 +1161,7 @@ PlatformBootManagerWaitCallback (
+   } else if (FirmwareVerLength > 0) {
+-    Status = gBS->HandleProtocol (
+-                    gST->ConsoleOutHandle,
+-                    &gEfiGraphicsOutputProtocolGuid,
+-                    (VOID **)&GraphicsOutput
+-                    );
+-    if (!EFI_ERROR (Status)) {
+-      PosX = (GraphicsOutput->Mode->Info->HorizontalResolution -
+-              (StrLen (VERSION_STRING_PREFIX) + FirmwareVerLength) *
+-              EFI_GLYPH_WIDTH) / 2;
+-      PosY = 0;
+-
+-      PrintXY (
+-        PosX,
+-        PosY,
+-        NULL,
+-        NULL,
+-        VERSION_STRING_PREFIX L"%s",
+-        PcdGetPtr (PcdFirmwareVersionString)
+-        );
+-    }
++    // graphical console: version centred at the top, the ESC/F2 prompt and
++    // the progress bar are drawn at the bottom while BDS waits
++    PosX = (GraphicsOutput->Mode->Info->HorizontalResolution -
++            (StrLen (VERSION_STRING_PREFIX) + FirmwareVerLength) *
++            EFI_GLYPH_WIDTH) / 2;
++    PosY = 0;
++
++    PrintXY (
++      PosX,
++      PosY,
++      NULL,
++      NULL,
++      VERSION_STRING_PREFIX L"%s",
++      PcdGetPtr (PcdFirmwareVersionString)
++      );
+   }
+ 
+   //
+@@ -1046,6 +1173,7 @@ PlatformBootManagerAfterConsole (
+   // refresh Boot order for newly discovered boot devices
+   //
+   BootDiscoveryPolicyHandler ();
++  PlatformWaitForUsb ();
+ 
+   //
+   // On ARM, there is currently no reason to use the phased capsule
+@@ -1089,7 +1217,7 @@ PlatformBootManagerWaitCallback (
    Status = BootLogoUpdateProgress (
               White.Pixel,
               Black.Pixel,
@@ -165,3 +271,16 @@ index ea093bb..a21339b 100644
               White.Pixel,
               (Timeout - TimeoutRemain) * 100 / Timeout,
               0
+diff --git a/ArmPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf b/ArmPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+index b5251e5..1c025b7 100644
+--- a/ArmPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
++++ b/ArmPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+@@ -81,6 +81,8 @@
+   gUefiShellFileGuid
+ 
+ [Protocols]
++  gEfiBlockIoProtocolGuid
++  gEfiSimpleTextInProtocolGuid
+   gEdkiiNonDiscoverableDeviceProtocolGuid
+   gEfiBootManagerPolicyProtocolGuid
+   gEfiDevicePathProtocolGuid
