@@ -1,0 +1,179 @@
+/* Linux host for development: x64e KERNEL [INITRD] [CMDLINE] */
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <string.h>
+#include <time.h>
+#include <signal.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <termios.h>
+#include <sys/mman.h>
+#include <sys/time.h>
+#include "x64e.h"
+
+static uint64_t   t0;
+static uc_engine *kick_uc;
+
+uint64_t
+host_now_ns (void)
+{
+  struct timespec ts;
+
+  clock_gettime (CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec - t0;
+}
+
+void
+host_console_write (const char *buf, size_t len)
+{
+  ssize_t r = write (1, buf, len);
+  (void)r;
+}
+
+int
+host_console_read (void)
+{
+  unsigned char c;
+  struct pollfd p = { 0, POLLIN, 0 };
+
+  if (poll (&p, 1, 0) > 0 && read (0, &c, 1) == 1) {
+    return c;
+  }
+
+  return -1;
+}
+
+void
+host_idle_until (uint64_t deadline)
+{
+  uint64_t      now = host_now_ns ();
+  struct pollfd p   = { 0, POLLIN, 0 };
+
+  if (deadline > now) {
+    poll (&p, 1, (int)((deadline - now + 999999) / 1000000));
+  }
+}
+
+static void
+on_kick (int sig)
+{
+  (void)sig;
+  if (kick_uc && getenv ("X64E_KICK_ONLY")) {
+    uc_x86_kick (kick_uc);
+  } else if (kick_uc && !getenv ("X64E_KICK_NOOP")) {
+    uc_emu_stop (kick_uc);
+  }
+}
+
+void
+host_start_kick_timer (uc_engine *uc, uint32_t period_us)
+{
+  struct itimerval it;
+  struct sigaction sa;
+
+  kick_uc = uc;
+  memset (&sa, 0, sizeof (sa));
+  sa.sa_handler = on_kick;
+  sa.sa_flags   = SA_RESTART;
+  sigaction (SIGALRM, &sa, NULL);
+  it.it_interval.tv_sec  = 0;
+  it.it_interval.tv_usec = period_us;
+  it.it_value            = it.it_interval;
+  setitimer (ITIMER_REAL, &it, NULL);
+}
+
+void
+host_log (const char *fmt, ...)
+{
+  va_list ap;
+
+  va_start (ap, fmt);
+  vfprintf (stderr, fmt, ap);
+  va_end (ap);
+}
+
+void *
+host_alloc (size_t size)
+{
+  void *p = mmap (NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+  return p == MAP_FAILED ? NULL : p;
+}
+
+static uint8_t *
+load_file (const char *path, size_t *size)
+{
+  FILE    *f = fopen (path, "rb");
+  uint8_t *b;
+  long     n;
+
+  if (!f) {
+    perror (path);
+    exit (1);
+  }
+
+  fseek (f, 0, SEEK_END);
+  n = ftell (f);
+  fseek (f, 0, SEEK_SET);
+  b = malloc (n);
+  if (fread (b, 1, n, f) != (size_t)n) {
+    exit (1);
+  }
+
+  fclose (f);
+  *size = n;
+  return b;
+}
+
+int
+main (int argc, char **argv)
+{
+  static machine_t m;
+  struct timespec  ts;
+  uint8_t         *k, *ird = NULL;
+  size_t           ks, is = 0;
+  const char      *cmd = "console=ttyS0 earlyprintk=serial nolapic noapic nokaslr";
+  struct termios   tio;
+  int              ram_mb = getenv ("X64E_RAM") ? atoi (getenv ("X64E_RAM")) : 512;
+
+  if (argc < 2) {
+    fprintf (stderr, "usage: %s bzImage [initrd] [cmdline]\n", argv[0]);
+    return 1;
+  }
+
+  clock_gettime (CLOCK_MONOTONIC, &ts);
+  t0 = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+
+  k = load_file (argv[1], &ks);
+  if (argc > 2 && argv[2][0]) {
+    ird = load_file (argv[2], &is);
+  }
+
+  if (argc > 3) {
+    cmd = argv[3];
+  }
+
+  if (machine_init (&m, ram_mb)) {
+    return 1;
+  }
+
+  clock_gettime (CLOCK_REALTIME, &ts);
+  m.boot_ns = (uint64_t)ts.tv_sec * 1000000000ULL;
+
+  if (linux_boot_setup (&m, k, ks, ird, is, cmd)) {
+    return 1;
+  }
+
+  if (isatty (0)) {
+    tcgetattr (0, &tio);
+    cfmakeraw (&tio);
+    tio.c_oflag |= OPOST | ONLCR;
+    tcsetattr (0, TCSANOW, &tio);
+  }
+
+  machine_run (&m);
+  return 0;
+}

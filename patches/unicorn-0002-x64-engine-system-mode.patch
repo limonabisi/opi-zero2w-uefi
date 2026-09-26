@@ -1,0 +1,384 @@
+diff --git a/include/uc_priv.h b/include/uc_priv.h
+index ad26c9e..d630bb1 100644
+--- a/include/uc_priv.h
++++ b/include/uc_priv.h
+@@ -402,6 +402,14 @@ struct uc_struct {
+     FlatView *empty_view; // Static function variable moved from flatviews_init
+     uc_cb_is_native_t is_native;
+     uc_cb_call_native_t call_native;
++
++    // x64 engine: external interrupt controller (PIC/APIC) acknowledge
++    int (*x86_irq_ack)(void *opaque);
++    void *x86_irq_opaque;
++    // x64 engine: whole-machine emulation. CPU exceptions and SYSCALL go to
++    // the guest (IDT / LSTAR) like on real hardware instead of to hooks.
++    bool x86_system_mode;
++    bool reset_requested;       // triple fault
+ };
+ 
+ // Metadata stub for the variable-size cpu context used with uc_context_*()
+diff --git a/include/unicorn/unicorn.h b/include/unicorn/unicorn.h
+index 4e7ed8e..0315efa 100644
+--- a/include/unicorn/unicorn.h
++++ b/include/unicorn/unicorn.h
+@@ -1260,6 +1260,29 @@ uc_err uc_get_code_gen_buf(uc_engine *uc,
+ UNICORN_EXPORT
+ uc_err uc_get_shared(uc_engine *uc, uc_shared **shared);
+ 
++/*
++  x64 engine extensions (x86 only): external hardware interrupts.
++  ack() is called when the CPU accepts the interrupt and returns the vector,
++  or -1 when nothing is pending any more. uc_x86_set_irq_line() raises or
++  lowers the INTR pin; it may be called from hooks while the CPU runs.
++*/
++UNICORN_EXPORT
++int uc_x86_set_irq_handler(uc_engine *uc, int (*ack)(void *opaque), void *opaque);
++UNICORN_EXPORT
++int uc_x86_set_irq_line(uc_engine *uc, int level);
++UNICORN_EXPORT
++uint64_t uc_x86_get_pc64(uc_engine *uc);
++UNICORN_EXPORT
++int uc_x86_is_halted(uc_engine *uc);
++UNICORN_EXPORT
++void uc_x86_get_state64(uc_engine *uc, uint64_t *out);
++UNICORN_EXPORT
++int uc_x86_set_system_mode(uc_engine *uc, int on);
++UNICORN_EXPORT
++int uc_x86_reset_requested(uc_engine *uc);
++UNICORN_EXPORT
++void uc_x86_kick(uc_engine *uc);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/include/unicorn/x86.h b/include/unicorn/x86.h
+index 5191743..be5e5b3 100644
+--- a/include/unicorn/x86.h
++++ b/include/unicorn/x86.h
+@@ -1674,6 +1674,7 @@ typedef enum uc_x86_insn {
+     UC_X86_INS_ENDING, // mark the end of the list of insn
+ } uc_x86_insn;
+ 
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/qemu/accel/tcg/cpu-exec.c b/qemu/accel/tcg/cpu-exec.c
+index 4012ba7..834b8ee 100644
+--- a/qemu/accel/tcg/cpu-exec.c
++++ b/qemu/accel/tcg/cpu-exec.c
+@@ -349,6 +349,26 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
+ 
+     // printf(">> exception index = %u\n", cpu->exception_index); qq
+ 
++    if (uc->x86_system_mode) {
++        // x64 engine: real hardware behaviour
++        if (cpu->exception_index < 0) {
++            return false;
++        }
++        if (cpu->exception_index >= EXCP_INTERRUPT) {
++            *ret = cpu->exception_index;
++            if (*ret == EXCP_DEBUG) {
++                cpu_handle_debug_exception(cpu);
++            }
++            cpu->exception_index = -1;
++            return true;
++        }
++        CPUClass *cc = CPU_GET_CLASS(cpu);
++        cc->do_interrupt(cpu);
++        cpu->exception_index = -1;
++        *ret = EXCP_INTERRUPT;
++        return false;
++    }
++
+     if (cpu->uc->stop_interrupt && cpu->uc->stop_interrupt(cpu->uc, cpu->exception_index)) {
+         // Unicorn: call registered invalid instruction callbacks
+         catched = false;
+diff --git a/qemu/accel/tcg/cputlb.c b/qemu/accel/tcg/cputlb.c
+index 5f50995..4e236fb 100644
+--- a/qemu/accel/tcg/cputlb.c
++++ b/qemu/accel/tcg/cputlb.c
+@@ -1191,11 +1191,12 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
+ {
+     ram_addr_t ram_addr = mem_vaddr + iotlbentry->addr;
+ 
+-    if (mr == NULL) {
++    // x64 engine: mem_vaddr is virtual in system mode; any RAM may hold code
++    if (mr == NULL && !cpu->uc->x86_system_mode) {
+         mr = memory_mapping(cpu->uc, mem_vaddr);
+     }
+ 
+-    if ((mr->perms & UC_PROT_EXEC) != 0) {
++    if (cpu->uc->x86_system_mode || (mr->perms & UC_PROT_EXEC) != 0) {
+         struct page_collection *pages
+             = page_collection_lock(cpu->uc, ram_addr, ram_addr + size);
+         tb_invalidate_phys_page_fast(cpu->uc, pages, ram_addr, size, retaddr);
+@@ -1473,10 +1474,11 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
+     bool handled;
+     HOOK_FOREACH_VAR_DECLARE;
+     struct uc_struct *uc = env->uc;
+-    MemoryRegion *mr = memory_mapping(uc, addr);
++    // x64 engine: in system mode addr is virtual; RAM is checked after the MMU
++    MemoryRegion *mr = uc->x86_system_mode ? NULL : memory_mapping(uc, addr);
+ 
+     // memory might be still unmapped while reading or fetching
+-    if (mr == NULL) {
++    if (mr == NULL && !uc->x86_system_mode) {
+         handled = false;
+         // if there is already an unhandled eror, skip callbacks.
+         if (uc->invalid_error == UC_ERR_OK) {
+@@ -2047,10 +2049,10 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
+     }
+ 
+     // Load the latest memory mapping.
+-    mr = memory_mapping(uc, addr);
++    mr = uc->x86_system_mode ? NULL : memory_mapping(uc, addr);
+ 
+     // Unicorn: callback on invalid memory
+-    if (mr == NULL) {
++    if (mr == NULL && !uc->x86_system_mode) {
+         handled = false;
+         HOOK_FOREACH(uc, hook, UC_HOOK_MEM_WRITE_UNMAPPED) {
+             if (hook->to_delete)
+diff --git a/qemu/softmmu/vl.c b/qemu/softmmu/vl.c
+index 6860afd..94f8d72 100644
+--- a/qemu/softmmu/vl.c
++++ b/qemu/softmmu/vl.c
+@@ -58,6 +58,7 @@ int machine_initialize(struct uc_struct *uc)
+ 
+ void qemu_system_reset_request(struct uc_struct* uc)
+ {
++    uc->reset_requested = true;
+     cpu_stop(uc);
+ }
+ 
+diff --git a/qemu/target/i386/excp_helper.c b/qemu/target/i386/excp_helper.c
+index f658c81..e03993f 100644
+--- a/qemu/target/i386/excp_helper.c
++++ b/qemu/target/i386/excp_helper.c
+@@ -644,8 +644,11 @@ do_check_protect_pse36:
+     assert(prot & (1 << is_write1));
+ 
+     // Unicorn: indentity map guest virtual address to host virtual address
+-    vaddr = addr & TARGET_PAGE_MASK;
+-    paddr = vaddr;
++    // x64 engine: keep the real translation in system mode
++    if (!env->uc->x86_system_mode) {
++        vaddr = addr & TARGET_PAGE_MASK;
++        paddr = vaddr;
++    }
+     //printf(">>> map address %"PRIx64" to %"PRIx64"\n", vaddr, paddr);
+  
+     tlb_set_page_with_attrs(cs, vaddr, paddr, cpu_get_mem_attrs(env),
+diff --git a/qemu/target/i386/seg_helper.c b/qemu/target/i386/seg_helper.c
+index 27efae9..83690a6 100644
+--- a/qemu/target/i386/seg_helper.c
++++ b/qemu/target/i386/seg_helper.c
+@@ -973,6 +973,45 @@ void helper_syscall(CPUX86State *env, int next_eip_addend)
+ {
+     // Unicorn: call registered syscall hooks
+     struct hook *hook;
++
++    if (env->uc->x86_system_mode) {
++        // x64 engine: architectural SYSCALL (from upstream QEMU)
++        int selector;
++
++        if (!(env->efer & MSR_EFER_SCE)) {
++            raise_exception_err_ra(env, EXCP06_ILLOP, 0, GETPC());
++        }
++        selector = (env->star >> 32) & 0xffff;
++        if (env->hflags & HF_LMA_MASK) {
++            int code64;
++
++            env->regs[R_ECX] = env->eip + next_eip_addend;
++            env->regs[11] = cpu_compute_eflags(env) & ~RF_MASK;
++            code64 = env->hflags & HF_CS64_MASK;
++            env->eflags &= ~(env->fmask | RF_MASK);
++            cpu_load_eflags(env, env->eflags, 0);
++            cpu_x86_load_seg_cache(env, R_CS, selector & 0xfffc, 0, 0xffffffff,
++                                   DESC_G_MASK | DESC_P_MASK | DESC_S_MASK |
++                                   DESC_CS_MASK | DESC_R_MASK | DESC_A_MASK |
++                                   DESC_L_MASK);
++            cpu_x86_load_seg_cache(env, R_SS, (selector + 8) & 0xfffc, 0, 0xffffffff,
++                                   DESC_G_MASK | DESC_B_MASK | DESC_P_MASK |
++                                   DESC_S_MASK | DESC_W_MASK | DESC_A_MASK);
++            env->eip = code64 ? env->lstar : env->cstar;
++        } else {
++            env->regs[R_ECX] = (uint32_t)(env->eip + next_eip_addend);
++            env->eflags &= ~(IF_MASK | RF_MASK | VM_MASK);
++            cpu_x86_load_seg_cache(env, R_CS, selector & 0xfffc, 0, 0xffffffff,
++                                   DESC_G_MASK | DESC_B_MASK | DESC_P_MASK |
++                                   DESC_S_MASK | DESC_CS_MASK | DESC_R_MASK |
++                                   DESC_A_MASK);
++            cpu_x86_load_seg_cache(env, R_SS, (selector + 8) & 0xfffc, 0, 0xffffffff,
++                                   DESC_G_MASK | DESC_B_MASK | DESC_P_MASK |
++                                   DESC_S_MASK | DESC_W_MASK | DESC_A_MASK);
++            env->eip = (uint32_t)env->star;
++        }
++        return;
++    }
+     HOOK_FOREACH_VAR_DECLARE;
+     HOOK_FOREACH(env->uc, hook, UC_HOOK_INSN) {
+         if (hook->to_delete)
+@@ -1257,7 +1296,10 @@ bool x86_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
+         cs->interrupt_request &= ~(CPU_INTERRUPT_HARD |
+                                    CPU_INTERRUPT_VIRQ);
+         // intno = cpu_get_pic_interrupt(env);
+-        intno = 0;
++        intno = env->uc->x86_irq_ack ? env->uc->x86_irq_ack(env->uc->x86_irq_opaque) : 0;
++        if (intno < 0) {
++            break;      // spurious: line dropped before acknowledge
++        }
+         //qemu_log_mask(CPU_LOG_TB_IN_ASM,
+         //              "Servicing hardware INT=0x%02x\n", intno);
+         do_interrupt_x86_hardirq(env, intno, 1);
+diff --git a/qemu/target/i386/translate.c b/qemu/target/i386/translate.c
+index b60ac08..7b548fe 100644
+--- a/qemu/target/i386/translate.c
++++ b/qemu/target/i386/translate.c
+@@ -3348,8 +3348,10 @@ static void gen_sse(CPUX86State *env, DisasContext *s, int b,
+         gen_illegal_opcode(s);
+         return;
+     }
++    /* x64 engine: VEX-encoded BMI (e.g. SHLX, VEX.66) does not need OSFXSR */
+     if (is_xmm
+         && !(s->flags & HF_OSFXSR_MASK)
++        && !(s->prefix & PREFIX_VEX)
+         && ((b != 0x38 && b != 0x3a) || (s->prefix & PREFIX_DATA))) {
+         goto unknown_op;
+     }
+diff --git a/qemu/target/i386/unicorn.c b/qemu/target/i386/unicorn.c
+index 61ae52d..08c7db8 100644
+--- a/qemu/target/i386/unicorn.c
++++ b/qemu/target/i386/unicorn.c
+@@ -178,6 +178,21 @@ void x86_reg_reset(struct uc_struct *uc)
+     case UC_MODE_32:
+         env->hflags |= HF_CS32_MASK | HF_SS32_MASK | HF_OSFXSR_MASK;
+         cpu_x86_update_cr0(env, CR0_PE_MASK); // protected mode
++#ifdef TARGET_X86_64
++        // x64 engine: a 32-bit start (boot loader) may switch to long mode,
++        // so report a complete x86-64 (baseline v1) CPU
++        env->features[FEAT_1_EDX] |= CPUID_FP87 | CPUID_VME | CPUID_DE |
++            CPUID_PSE | CPUID_TSC | CPUID_MSR | CPUID_PAE | CPUID_MCE |
++            CPUID_CX8 | CPUID_SEP | CPUID_MTRR | CPUID_PGE | CPUID_MCA |
++            CPUID_CMOV | CPUID_PAT | CPUID_PSE36 | CPUID_CLFLUSH |
++            CPUID_MMX | CPUID_FXSR | CPUID_SSE | CPUID_SSE2;
++        env->features[FEAT_8000_0001_EDX] |= CPUID_EXT2_LM |
++            CPUID_EXT2_SYSCALL | CPUID_EXT2_NX;
++        env->features[FEAT_8000_0001_EDX] &= ~CPUID_EXT2_3DNOW;
++        env->features[FEAT_8000_0001_ECX] |= CPUID_EXT3_LAHF_LM;
++        // BMI1/BMI2 translation is unreliable in this TCG: hide them
++        env->features[FEAT_7_0_EBX] &= ~(CPUID_7_0_EBX_BMI1 | CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ADX);
++#endif
+         break;
+     case UC_MODE_64:
+         env->hflags |= HF_CS32_MASK | HF_SS32_MASK | HF_CS64_MASK |
+@@ -1678,3 +1693,76 @@ void x86_uc_init(struct uc_struct *uc)
+ }
+ 
+ /* vim: set ts=4 sts=4 sw=4 et:  */
++
++UNICORN_EXPORT
++int uc_x86_set_irq_handler(struct uc_struct *uc, int (*ack)(void *opaque), void *opaque)
++{
++    uc->x86_irq_ack = ack;
++    uc->x86_irq_opaque = opaque;
++    return 0;
++}
++
++UNICORN_EXPORT
++int uc_x86_set_irq_line(struct uc_struct *uc, int level)
++{
++    CPUState *cs = uc->cpu;
++    if (level) {
++        cpu_interrupt(cs, CPU_INTERRUPT_HARD);
++    } else {
++        cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
++    }
++    return 0;
++}
++
++UNICORN_EXPORT
++uint64_t uc_x86_get_pc64(struct uc_struct *uc)
++{
++    return ((CPUX86State *)uc->cpu->env_ptr)->eip;
++}
++
++UNICORN_EXPORT
++int uc_x86_is_halted(struct uc_struct *uc)
++{
++    return uc->cpu->halted;
++}
++
++/* out: 0..15 GPRs, 16 rip, 17 rflags, 18 cr0, 19 cr2, 20 cr3, 21 cr4, 22 efer */
++UNICORN_EXPORT
++void uc_x86_get_state64(struct uc_struct *uc, uint64_t *out)
++{
++    CPUX86State *env = (CPUX86State *)uc->cpu->env_ptr;
++    int i;
++
++    for (i = 0; i < 16; i++) {
++        out[i] = env->regs[i];
++    }
++    out[16] = env->eip;
++    out[17] = cpu_compute_eflags(env);
++    out[18] = env->cr[0];
++    out[19] = env->cr[2];
++    out[20] = env->cr[3];
++    out[21] = env->cr[4];
++    out[22] = env->efer;
++}
++
++UNICORN_EXPORT
++int uc_x86_set_system_mode(struct uc_struct *uc, int on)
++{
++    uc->x86_system_mode = on != 0;
++    return 0;
++}
++
++UNICORN_EXPORT
++int uc_x86_reset_requested(struct uc_struct *uc)
++{
++    int r = uc->reset_requested;
++    uc->reset_requested = false;
++    return r;
++}
++
++/* x64 engine: force an exit to the CPU loop at the next TB boundary */
++UNICORN_EXPORT
++void uc_x86_kick(struct uc_struct *uc)
++{
++    cpu_exit(uc->cpu);
++}
+diff --git a/qemu/tcg/tcg-op.c b/qemu/tcg/tcg-op.c
+index 37971d5..7777074 100644
+--- a/qemu/tcg/tcg-op.c
++++ b/qemu/tcg/tcg-op.c
+@@ -2861,6 +2861,13 @@ void check_exit_request(TCGContext *tcg_ctx)
+         return;
+     }
+ 
++    // x64 engine: exits only at TB boundaries, where the guest state is
++    // precise. An exit after a memory access would restart the TB and
++    // repeat stores that already happened.
++    if (tcg_ctx->uc->x86_system_mode) {
++        return;
++    }
++
+     count = tcg_temp_new_i32(tcg_ctx);
+ 
+     tcg_gen_ld_i32(tcg_ctx, count, tcg_ctx->cpu_env,
+diff --git a/uc.c b/uc.c
+index 4444016..10ccfe7 100644
+--- a/uc.c
++++ b/uc.c
+@@ -794,7 +794,8 @@ uc_err uc_emu_start(uc_engine *uc, uint64_t begin, uint64_t until,
+             break;
+         }
+         case UC_MODE_32:
+-            uc_reg_write(uc, UC_X86_REG_EIP, &begin_pc32);
++            // x64 engine: a 32-bit start may have switched to long mode
++            uc->set_pc(uc, begin);
+             break;
+         case UC_MODE_64:
+             uc_reg_write(uc, UC_X86_REG_RIP, &begin);
