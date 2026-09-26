@@ -102,12 +102,16 @@ STATIC INT32       mScroll;
 STATIC UINTN       mHdmiMode, mHdmiModeOrig;
 STATIC INT32       mTimeout, mTimeoutOrig;
 STATIC UINTN       mLang, mLangOrig;
+STATIC UINTN       mSecureBoot, mSecureBootOrig;
 STATIC BOOT_ENTRY  mBoot[MAX_BOOT];
 STATIC UINTN       mBootCount;
 STATIC UINT16      mBootOrderOrig[MAX_BOOT];
 STATIC UINT16      *mHiddenOrder;          // hidden/inactive entries, kept at the end
 STATIC UINTN       mHiddenCount;
 STATIC INT32       mYear, mMonth, mDay, mHour, mMinute;
+STATIC INT32       mTimeOrig[5];
+STATIC BOOLEAN     TimeChanged (VOID);
+STATIC BOOLEAN     Dialog (CONST CHAR16 *Title, CONST CHAR16 *Msg, CONST CHAR16 *Primary, CONST CHAR16 *Secondary);
 
 STATIC ITEM   mItems[MAX_ITEMS];
 STATIC UINTN  mItemCount;
@@ -207,6 +211,18 @@ AddAction (
 }
 
 STATIC
+UINTN
+CurrentEl (
+  VOID
+  )
+{
+  UINT64  El;
+
+  __asm__ volatile ("mrs %0, CurrentEL" : "=r" (El));
+  return (UINTN)((El >> 2) & 3);
+}
+
+STATIC
 VOID
 BuildPage (
   VOID
@@ -267,16 +283,23 @@ BuildPage (
       Add (ItSection, S (StrTime));
       AddNumber (S (StrHour), &mHour, 0, 23, NULL);
       AddNumber (S (StrMinute), &mMinute, 0, 59, NULL);
-      Add (ItSection, L"");
-      AddAction (S (StrApplyTime), NULL, ActSetTime, FALSE);
       break;
 
     case PAGE_SECURITY:
       Add (ItSection, S (StrSecurity));
-      AddInfo (S (StrSecureBoot), S (StrNotSupported));
+      It             = Add (ItChoice, S (StrSecureBoot));
+      It->Desc       = S (StrSbDesc);
+      It->Choice     = &mSecureBoot;
+      It->Options[0] = S (StrSbOff);
+      It->Options[1] = S (StrSbOn);
+      It->OptCount   = 2;
+      AddInfo (S (StrSbState), SbActive () ? S (StrSbActive) : S (StrSbInactive));
       AddInfo (S (StrTpm), S (StrNone));
       AddInfo (S (StrPassword), S (StrNotSet));
       AddInfo (S (StrAcpi), S (StrAcpiOn));
+      Add (ItSection, S (StrVirtSec));
+      AddInfo (S (StrVirt), (CurrentEl () == 2) ? S (StrVirtOn) : S (StrVirtOff));
+      AddInfo (S (StrVGic), L"GIC-400  ·  GICv2");
       break;
 
     case PAGE_STARTUP:
@@ -404,6 +427,15 @@ LoadSettings (
     mMinute = Now.Minute;
   }
 
+  mTimeOrig[0] = mYear;
+  mTimeOrig[1] = mMonth;
+  mTimeOrig[2] = mDay;
+  mTimeOrig[3] = mHour;
+  mTimeOrig[4] = mMinute;
+
+  mSecureBoot     = SbPkEnrolled () ? 1 : 0;
+  mSecureBootOrig = mSecureBoot;
+
   //
   // Boot options, in BootOrder order. Only active, visible ones can be
   // reordered here; the others keep their place at the end of BootOrder.
@@ -427,6 +459,44 @@ LoadSettings (
   }
 
   EfiBootManagerFreeLoadOptions (Opts, OptCount);
+
+  //
+  // Date/time: written only when edited, so saving other settings does not
+  // move the clock back to the moment setup was opened.
+  //
+  if (TimeChanged () && !EFI_ERROR (gRT->GetTime (&Now, NULL))) {
+    STATIC CONST UINT8  Days[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    INT32               Max;
+
+    Max = Days[mMonth - 1];
+    if ((mMonth == 2) && ((mYear % 4) == 0)) {
+      Max = 29;
+    }
+
+    Now.Year   = (UINT16)mYear;
+    Now.Month  = (UINT8)mMonth;
+    Now.Day    = (UINT8)MIN (mDay, Max);
+    Now.Hour   = (UINT8)mHour;
+    Now.Minute = (UINT8)mMinute;
+    Now.Second = 0;
+    Now.Nanosecond = 0;
+    gRT->SetTime (&Now);
+  }
+
+  mTimeOrig[0] = mYear;
+  mTimeOrig[1] = mMonth;
+  mTimeOrig[2] = mDay;
+  mTimeOrig[3] = mHour;
+  mTimeOrig[4] = mMinute;
+
+  if (mSecureBoot != mSecureBootOrig) {
+    if (EFI_ERROR ((mSecureBoot != 0) ? SbEnable () : SbDisable ())) {
+      Dialog (S (StrSecureBoot), S (StrSbFailed), S (StrOk), NULL);
+      mSecureBoot = SbPkEnrolled () ? 1 : 0;
+    }
+
+    mSecureBootOrig = mSecureBoot;
+  }
 
   mHdmiModeOrig = mHdmiMode;
   mTimeoutOrig  = mTimeout;
@@ -452,12 +522,23 @@ BootOrderChanged (
 
 STATIC
 BOOLEAN
+TimeChanged (
+  VOID
+  )
+{
+  return (mYear != mTimeOrig[0]) || (mMonth != mTimeOrig[1]) || (mDay != mTimeOrig[2]) ||
+         (mHour != mTimeOrig[3]) || (mMinute != mTimeOrig[4]);
+}
+
+STATIC
+BOOLEAN
 Dirty (
   VOID
   )
 {
   return (mHdmiMode != mHdmiModeOrig) || (mTimeout != mTimeoutOrig) ||
-         (mLang != mLangOrig) || BootOrderChanged ();
+         (mLang != mLangOrig) || (mSecureBoot != mSecureBootOrig) ||
+         BootOrderChanged () || TimeChanged ();
 }
 
 STATIC
@@ -468,8 +549,9 @@ SaveSettings (
 {
   UINT8   B;
   UINT16  T;
-  UINT16  *Order;
-  UINTN   I;
+  UINT16    *Order;
+  UINTN     I;
+  EFI_TIME  Now;
 
   B = (UINT8)mHdmiMode;
   gRT->SetVariable (L"HdmiMode", &mHdmiVarGuid, EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS, 1, &B);
@@ -510,6 +592,44 @@ SaveSettings (
 
   for (I = 0; I < mBootCount; I++) {
     mBootOrderOrig[I] = mBoot[I].Number;
+  }
+
+  //
+  // Date/time: written only when edited, so saving other settings does not
+  // move the clock back to the moment setup was opened.
+  //
+  if (TimeChanged () && !EFI_ERROR (gRT->GetTime (&Now, NULL))) {
+    STATIC CONST UINT8  Days[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    INT32               Max;
+
+    Max = Days[mMonth - 1];
+    if ((mMonth == 2) && ((mYear % 4) == 0)) {
+      Max = 29;
+    }
+
+    Now.Year   = (UINT16)mYear;
+    Now.Month  = (UINT8)mMonth;
+    Now.Day    = (UINT8)MIN (mDay, Max);
+    Now.Hour   = (UINT8)mHour;
+    Now.Minute = (UINT8)mMinute;
+    Now.Second = 0;
+    Now.Nanosecond = 0;
+    gRT->SetTime (&Now);
+  }
+
+  mTimeOrig[0] = mYear;
+  mTimeOrig[1] = mMonth;
+  mTimeOrig[2] = mDay;
+  mTimeOrig[3] = mHour;
+  mTimeOrig[4] = mMinute;
+
+  if (mSecureBoot != mSecureBootOrig) {
+    if (EFI_ERROR ((mSecureBoot != 0) ? SbEnable () : SbDisable ())) {
+      Dialog (S (StrSecureBoot), S (StrSbFailed), S (StrOk), NULL);
+      mSecureBoot = SbPkEnrolled () ? 1 : 0;
+    }
+
+    mSecureBootOrig = mSecureBoot;
   }
 
   mHdmiModeOrig = mHdmiMode;
@@ -1129,7 +1249,7 @@ DoAction (
   EFI_TIME  Now;
   BOOLEAN   HdmiChanged;
 
-  HdmiChanged = (BOOLEAN)(mHdmiMode != mHdmiModeOrig);
+  HdmiChanged = (BOOLEAN)((mHdmiMode != mHdmiModeOrig) || (mSecureBoot != mSecureBootOrig));
 
   switch (Action) {
     case ActSaveExit:
@@ -1325,34 +1445,65 @@ DrawBootMenu (
   VOID
   )
 {
-  INT32         X, Y, H, I, Rows, Kx;
+  INT32         X, Y, H, I, Kx, P, Vis, Avail, Dev;
   BOOLEAN       Sel;
   CONST CHAR16  *Label;
   CHAR16        Num[8];
+  STATIC INT32  mBmTop;
 
   GfxFill (0, 0, gCanvas.W, gCanvas.H, COL_SIDEBAR);
   DrawLogo (40, 32);
 
-  Rows = (INT32)BootMenuCount ();
-  H    = 112 + (INT32)mBootCount * (BM_ROW_H + 6) + 28 + 2 * (BM_ROW_H + 6) + 18;
-  if (mBootCount == 0) {
-    H += BM_ROW_H + 6;
+  //
+  // Card height: fixed part + as many device rows as fit between the logo
+  // and the key hints; the device list scrolls when there are more.
+  //
+  P     = BM_ROW_H + 6;
+  Avail = gCanvas.H - 112 - 64;
+  Dev   = (mBootCount == 0) ? 1 : (INT32)mBootCount;
+  Vis   = MAX (1, MIN (Dev, (Avail - (112 + 28 + 2 * P + 18)) / P));
+  if ((INT32)mBmSel < (INT32)mBootCount) {
+    if ((INT32)mBmSel < mBmTop) {
+      mBmTop = (INT32)mBmSel;
+    } else if ((INT32)mBmSel >= mBmTop + Vis) {
+      mBmTop = (INT32)mBmSel - Vis + 1;
+    }
   }
 
+  mBmTop = MAX (0, MIN (mBmTop, Dev - Vis));
+  H      = 112 + Vis * P + 28 + 2 * P + 18;
+
   X = (gCanvas.W - BM_W) / 2;
-  Y = MAX (120, (gCanvas.H - H) / 2 + 20);
+  Y = MAX (112, (gCanvas.H - H) / 2 + 20);
+  if (Y + H > gCanvas.H - 60) {
+    Y = MAX (100, gCanvas.H - 60 - H);
+  }
+
   GfxShadow (X, Y, BM_W, H, 16);
   GfxRoundRect (X, Y, BM_W, H, 16, COL_CARD);
   GfxText (gFontTitle, X + 32, Y + 26, S (StrBootMenu), COL_TEXT);
   GfxText (gFontBody, X + 32, Y + 68, S (StrBootMenuSub), COL_TEXT_2);
 
+  // scroll hints
+  if (mBmTop > 0) {
+    GfxTriangle (X + BM_W - 44, Y + 88, 6, TRUE, COL_TEXT_2);
+  }
+
+  if (mBmTop + Vis < Dev) {
+    GfxTriangle (X + BM_W - 44, Y + 112 + Vis * P + 2, 6, FALSE, COL_TEXT_2);
+  }
+
   Y += 112;
   if (mBootCount == 0) {
     GfxText (gFontBody, X + 32, Y + 14, S (StrNoStorage), COL_TEXT_2);
-    Y += BM_ROW_H + 6;
+    Y += P;
   }
 
-  for (I = 0; I < Rows; I++) {
+  for (I = mBmTop; I < (INT32)BootMenuCount (); I++) {
+    if ((I < (INT32)mBootCount) && (I >= mBmTop + Vis)) {
+      continue;
+    }
+
     if (I == (INT32)mBootCount) {
       GfxFill (X + 24, Y + 10, BM_W - 48, 1, COL_LINE);
       Y += 28;

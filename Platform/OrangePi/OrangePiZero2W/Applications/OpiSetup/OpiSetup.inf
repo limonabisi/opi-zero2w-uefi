@@ -19,16 +19,20 @@
   Gfx.c
   Strings.c
   SysInfo.c
+  SecureBoot.c
 
 [Packages]
   MdePkg/MdePkg.dec
   MdeModulePkg/MdeModulePkg.dec
+  SecurityPkg/SecurityPkg.dec
 
 [LibraryClasses]
   BaseLib
   BaseMemoryLib
   DebugLib
   DevicePathLib
+  DxeServicesLib
+  SecureBootVariableLib
   MemoryAllocationLib
   PcdLib
   PrintLib
@@ -46,6 +50,10 @@
 
 [Guids]
   gEfiGlobalVariableGuid
+  gEfiImageSecurityDatabaseGuid
+  gDefaultPKFileGuid
+  gDefaultKEKFileGuid
+  gDefaultdbFileGuid
 
 [Pcd]
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString

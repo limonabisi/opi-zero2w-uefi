@@ -97,7 +97,7 @@ typedef enum {
   StrDisplay, StrStorage, StrNoStorage, StrConsole,
   StrDisplaySec, StrHdmiRes, StrAuto, StrHdmiNote, StrGeneral, StrLanguage, StrTimeout, StrSeconds,
   StrNow, StrDate, StrTime, StrYear, StrMonth, StrDay, StrHour, StrMinute, StrApplyTime, StrTimeSet,
-  StrSecureBoot, StrNotSupported, StrTpm, StrNone, StrAcpi, StrAcpiOn, StrPassword, StrNotSet,
+  StrSecureBoot, StrSbDesc, StrSbOff, StrSbOn, StrSbState, StrSbActive, StrSbInactive, StrSbFailed, StrNotSupported, StrTpm, StrNone, StrAcpi, StrAcpiOn, StrVirtSec, StrVirt, StrVirtOn, StrVirtOff, StrVGic, StrPassword, StrNotSet,
   StrBootOrder, StrBootOrderHint, StrBootNow, StrBootFailed, StrOneTime,
   StrSaveExit, StrSaveRestart, StrDiscardExit, StrRestart, StrShutdown, StrShell, StrClassic,
   StrSaveExitDesc, StrSaveRestartDesc, StrDiscardExitDesc, StrRestartDesc, StrShutdownDesc, StrShellDesc, StrClassicDesc,
@@ -127,5 +127,13 @@ typedef struct {
 } SYS_INFO;
 
 VOID  SysInfoCollect (SYS_INFO *Info);
+
+//
+// Secure Boot (SecureBoot.c)
+//
+BOOLEAN     SbPkEnrolled (VOID);
+BOOLEAN     SbActive (VOID);
+EFI_STATUS  SbEnable (VOID);
+EFI_STATUS  SbDisable (VOID);
 
 #endif

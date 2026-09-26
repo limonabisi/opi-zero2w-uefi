@@ -8,12 +8,12 @@
 
 [FD.OPIZERO2W_EFI]
 BaseAddress   = 0x4A000000|gArmTokenSpaceGuid.PcdFdBaseAddress
-Size          = 0x00100000|gArmTokenSpaceGuid.PcdFdSize          # 1 MiB (LZMA-compressed DXE FV)
+Size          = 0x00200000|gArmTokenSpaceGuid.PcdFdSize          # 2 MiB (LZMA-compressed DXE FV incl. crypto for Secure Boot)
 ErasePolarity = 1
 BlockSize     = 0x00001000
-NumBlocks     = 0x100
+NumBlocks     = 0x200
 
-0x00000000|0x000E0000
+0x00000000|0x001E0000
 gArmTokenSpaceGuid.PcdFvBaseAddress|gArmTokenSpaceGuid.PcdFvSize
 FV = FVMAIN_COMPACT
 
@@ -24,7 +24,7 @@ FV = FVMAIN_COMPACT
 # initial headers as the Raspberry Pi 4 port.
 #
 # NV_VARIABLE_STORE
-0x000E0000|0x0000E000
+0x001E0000|0x0000E000
 gH616TokenSpaceGuid.PcdNvStorageVariableBase|gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageVariableSize
 DATA = {
   ## EFI_FIRMWARE_VOLUME_HEADER
@@ -58,11 +58,11 @@ DATA = {
 }
 
 # NV_EVENT_LOG
-0x000EE000|0x00001000
+0x001EE000|0x00001000
 gH616TokenSpaceGuid.PcdNvStorageEventLogBase|gH616TokenSpaceGuid.PcdNvStorageEventLogSize
 
 # NV_FTW_WORKING header
-0x000EF000|0x00001000
+0x001EF000|0x00001000
 gH616TokenSpaceGuid.PcdNvStorageFtwWorkingBase|gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwWorkingSize
 DATA = {
   # EFI_FAULT_TOLERANT_WORKING_BLOCK_HEADER->Signature = gEdkiiWorkingBlockSignatureGuid
@@ -75,7 +75,7 @@ DATA = {
 }
 
 # NV_FTW_SPARE
-0x000F0000|0x00010000
+0x001F0000|0x00010000
 gH616TokenSpaceGuid.PcdNvStorageFtwSpareBase|gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwSpareSize
 
 ################################################################################
@@ -111,6 +111,22 @@ READ_LOCK_STATUS   = TRUE
   INF ArmPkg/Drivers/TimerDxe/TimerDxe.inf
   INF MdeModulePkg/Core/RuntimeDxe/RuntimeDxe.inf
   INF MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
+
+  # Secure Boot default keys (enrolled from OpiSetup): PK, KEK, db
+  FILE FREEFORM = 85254ea7-4759-4fc4-82d4-5eed5fb0a4a0 {
+    SECTION RAW = Platform/OrangePi/OrangePiZero2W/SecureBootKeys/PK.der
+  }
+  FILE FREEFORM = 6f64916e-9f7a-4c35-b952-cd041efb05a3 {
+    SECTION RAW = Platform/OrangePi/OrangePiZero2W/SecureBootKeys/KEK/MicCorKEKCA2011.der
+    SECTION RAW = Platform/OrangePi/OrangePiZero2W/SecureBootKeys/KEK/MicCorKEK2kCA2023.der
+  }
+  FILE FREEFORM = c491d352-7623-4843-accc-2791a7574421 {
+    SECTION RAW = Platform/OrangePi/OrangePiZero2W/SecureBootKeys/db/MicWinProPCA2011.der
+    SECTION RAW = Platform/OrangePi/OrangePiZero2W/SecureBootKeys/db/MicCorUEFCA2011.der
+    SECTION RAW = Platform/OrangePi/OrangePiZero2W/SecureBootKeys/db/WindowsUEFICA2023.der
+    SECTION RAW = Platform/OrangePi/OrangePiZero2W/SecureBootKeys/db/MicrosoftUEFICA2023.der
+    SECTION RAW = Platform/OrangePi/OrangePiZero2W/SecureBootKeys/db/MicrosoftOptionROMUEFICA2023.der
+  }
   INF MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
   INF Platform/OrangePi/OrangePiZero2W/Drivers/VarBlockServiceDxe/VarBlockServiceDxe.inf
   INF MdeModulePkg/Universal/FaultTolerantWriteDxe/FaultTolerantWriteDxe.inf

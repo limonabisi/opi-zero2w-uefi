@@ -129,7 +129,16 @@
 
   # Variables are kept in RAM (no SPI NOR driver yet)
   VarCheckLib|MdeModulePkg/Library/VarCheckLib/VarCheckLib.inf
-  AuthVariableLib|MdeModulePkg/Library/AuthVariableLibNull/AuthVariableLibNull.inf
+  #
+  # UEFI Secure Boot (authenticated variables, image verification)
+  #
+  IntrinsicLib|CryptoPkg/Library/IntrinsicLib/IntrinsicLib.inf
+  OpensslLib|CryptoPkg/Library/OpensslLib/OpensslLibCrypto.inf
+  BaseCryptLib|CryptoPkg/Library/BaseCryptLib/BaseCryptLib.inf
+  AuthVariableLib|SecurityPkg/Library/AuthVariableLib/AuthVariableLib.inf
+  SecureBootVariableLib|SecurityPkg/Library/SecureBootVariableLib/SecureBootVariableLib.inf
+  PlatformPKProtectionLib|SecurityPkg/Library/PlatformPKProtectionLibVarPolicy/PlatformPKProtectionLibVarPolicy.inf
+  PlatformSecureLib|OvmfPkg/Library/PlatformSecureLib/PlatformSecureLib.inf
   TpmMeasurementLib|MdeModulePkg/Library/TpmMeasurementLibNull/TpmMeasurementLibNull.inf
   VariableFlashInfoLib|MdeModulePkg/Library/BaseVariableFlashInfoLib/BaseVariableFlashInfoLib.inf
   VariablePolicyLib|MdeModulePkg/Library/VariablePolicyLib/VariablePolicyLib.inf
@@ -172,6 +181,7 @@
   ExtractGuidedSectionLib|MdePkg/Library/DxeExtractGuidedSectionLib/DxeExtractGuidedSectionLib.inf
 
 [LibraryClasses.common.DXE_RUNTIME_DRIVER]
+  BaseCryptLib|CryptoPkg/Library/BaseCryptLib/RuntimeCryptLib.inf
   CapsuleLib|MdeModulePkg/Library/DxeCapsuleLibNull/DxeCapsuleLibNull.inf
   ReportStatusCodeLib|MdeModulePkg/Library/RuntimeDxeReportStatusCodeLib/RuntimeDxeReportStatusCodeLib.inf
   VariablePolicyLib|MdeModulePkg/Library/VariablePolicyLib/VariablePolicyLibRuntimeDxe.inf
@@ -200,7 +210,7 @@
 
 [PcdsFixedAtBuild.common]
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"Orange Pi Zero 2W EDK2 port"
-  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.6.1-h618"
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.7.0-h618"
 
   gEfiMdePkgTokenSpaceGuid.PcdMaximumUnicodeStringLength|1000000
   gEfiMdePkgTokenSpaceGuid.PcdMaximumAsciiStringLength|1000000
@@ -309,6 +319,12 @@
   gArmTokenSpaceGuid.PcdGicInterruptInterfaceBase|0x08010000
 !endif
 
+[PcdsFixedAtBuild.common]
+  # Secure Boot: verify images from every source (when enabled in setup)
+  gEfiSecurityPkgTokenSpaceGuid.PcdOptionRomImageVerificationPolicy|0x04
+  gEfiSecurityPkgTokenSpaceGuid.PcdFixedMediaImageVerificationPolicy|0x04
+  gEfiSecurityPkgTokenSpaceGuid.PcdRemovableMediaImageVerificationPolicy|0x04
+
 [PcdsDynamicDefault.common]
   # Set at runtime by VarBlockServiceDxe (NV store copied to runtime memory)
   gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageVariableBase64|0
@@ -358,7 +374,10 @@
   ArmPkg/Drivers/ArmGicDxe/ArmGicDxe.inf
   ArmPkg/Drivers/TimerDxe/TimerDxe.inf
   MdeModulePkg/Core/RuntimeDxe/RuntimeDxe.inf
-  MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
+  MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf {
+    <LibraryClasses>
+      NULL|SecurityPkg/Library/DxeImageVerificationLib/DxeImageVerificationLib.inf
+  }
   MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
   Platform/OrangePi/OrangePiZero2W/Drivers/VarBlockServiceDxe/VarBlockServiceDxe.inf
   MdeModulePkg/Universal/FaultTolerantWriteDxe/FaultTolerantWriteDxe.inf {
