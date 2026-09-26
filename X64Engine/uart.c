@@ -29,11 +29,53 @@ uart_update_irq (machine_t *m)
   }
 }
 
+static void
+kbd_poll_input (machine_t *m)
+{
+  static int esc;              /* 0, 1 = ESC seen, 2 = ESC [ seen */
+  int        c;
+
+  while ((c = host_console_read ()) >= 0) {
+    if (esc == 1) {
+      if (c == '[') {
+        esc = 2;
+        continue;
+      }
+
+      kbd_type_char (m, 27);
+      esc = 0;
+    } else if (esc == 2) {
+      esc = 0;
+      switch (c) {
+        case 'A': kbd_type_key (m, KEY_UP); continue;
+        case 'B': kbd_type_key (m, KEY_DOWN); continue;
+        case 'C': kbd_type_key (m, KEY_RIGHT); continue;
+        case 'D': kbd_type_key (m, KEY_LEFT); continue;
+        case 'H': kbd_type_key (m, KEY_HOME); continue;
+        case 'F': kbd_type_key (m, KEY_END); continue;
+        default: continue;
+      }
+    }
+
+    if (c == 27) {
+      esc = 1;
+      continue;
+    }
+
+    kbd_type_char (m, c);
+  }
+}
+
 void
 uart_poll_input (machine_t *m)
 {
   uart_t *u = &m->uart;
   int     c;
+
+  if (m->console_to_kbd) {
+    kbd_poll_input (m);
+    return;
+  }
 
   while (rx_count (u) < (int)sizeof (u->rx) && (c = host_console_read ()) >= 0) {
     u->rx[u->rx_head++ % sizeof (u->rx)] = (uint8_t)c;

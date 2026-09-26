@@ -14,7 +14,7 @@ kq_push (machine_t *m, uint8_t b)
 {
   i8042_t *k = &m->kbd;
 
-  if ((uint8_t)(k->head - k->tail) < sizeof (k->q) - 1) {
+  if ((uint8_t)(k->head - k->tail) < 255) {
     k->q[k->head++ % sizeof (k->q)] = b;
   }
 }
@@ -23,14 +23,22 @@ static void
 kbd_update_irq (machine_t *m)
 {
   i8042_t *k = &m->kbd;
-  int      level;
+  int      level, fresh = 0;
 
   if (!k->obf && k->head != k->tail && !(k->ccb & 0x10)) {
     k->out = k->q[k->tail++ % sizeof (k->q)];
     k->obf = 1;
+    fresh  = 1;
   }
 
   level = k->obf && (k->ccb & 0x01);
+  if (fresh && level && k->irq_level) {
+    /* IRQ1 is edge triggered: every new byte needs a new rising edge */
+    pic_set_irq (m, 1, 0);
+    pic_set_irq (m, 1, 1);
+    return;
+  }
+
   if (level != k->irq_level) {
     k->irq_level = level;
     pic_set_irq (m, 1, level);
@@ -109,7 +117,7 @@ i8042_io_read (machine_t *m, uint16_t port)
   uint8_t  v;
 
   if (port == 0x64) {
-    v = ST_SYS | (k->last_was_cmd ? ST_CMD : 0);
+    v = ST_SYS | 0x10 | (k->last_was_cmd ? ST_CMD : 0);   /* 0x10: not inhibited */
     if (k->obf) {
       v |= ST_OBF;
     }

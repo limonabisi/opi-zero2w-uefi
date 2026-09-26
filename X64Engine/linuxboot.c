@@ -98,6 +98,26 @@ linux_boot_setup (machine_t *m, const uint8_t *k, size_t ksize,
     wr32 (bp + 0x21c, (uint32_t)isize);
   }
 
+  if (m->fb) {
+    /* screen_info: VESA linear framebuffer, 32 bpp BGRX */
+    uint64_t fbsize = (uint64_t)m->fb_stride * m->fb_h;
+
+    bp[0x0f] = 0x23;                                     /* VIDEO_TYPE_VLFB */
+    wr16 (bp + 0x12, m->fb_w);
+    wr16 (bp + 0x14, m->fb_h);
+    wr16 (bp + 0x16, 32);
+    wr32 (bp + 0x18, (uint32_t)FB_BASE);
+    wr32 (bp + 0x1c, (uint32_t)((fbsize + 0xffff) >> 16)); /* 64 KB units */
+    wr16 (bp + 0x24, m->fb_stride);
+    bp[0x26] = 8; bp[0x27] = 16;                         /* red   */
+    bp[0x28] = 8; bp[0x29] = 8;                          /* green */
+    bp[0x2a] = 8; bp[0x2b] = 0;                          /* blue  */
+    bp[0x2c] = 8; bp[0x2d] = 24;                         /* rsvd  */
+    wr16 (bp + 0x32, 1);                                 /* pages */
+    bp[0x07] = 80;                                       /* cols  */
+    bp[0x0e] = 25;                                       /* lines */
+  }
+
   e820_add (bp, 0, EBDA_START, 1);
   e820_add (bp, EBDA_START, 0x100000 - EBDA_START, 2);
   e820_add (bp, 0x100000, m->ram_size - 0x100000, 1);

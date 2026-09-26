@@ -2,7 +2,7 @@ UC      ?= ../unicorn-src
 UCBUILD ?= ../build-uc
 CFLAGS  ?= -O2 -g -Wall -Wno-unused-parameter
 CFLAGS  += -I$(UC)/include
-SRCS     = machine.c pic.c pit.c uart.c i8042.c pci.c virtio_blk.c iso9660.c bootcfg.c linuxboot.c host_posix.c
+SRCS     = machine.c pic.c pit.c uart.c i8042.c keymap.c pci.c virtio_blk.c iso9660.c bootcfg.c linuxboot.c host_posix.c
 OBJS     = $(SRCS:.c=.o)
 
 x64e: $(OBJS) $(UCBUILD)/libunicorn.a

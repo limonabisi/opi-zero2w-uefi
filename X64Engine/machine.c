@@ -335,6 +335,25 @@ machine_init (machine_t *m, uint64_t ram_mb)
   return 0;
 }
 
+/* 32 bpp BGRX framebuffer shared with the host (GOP memory on the board) */
+int
+machine_set_fb (machine_t *m, void *fb, uint32_t w, uint32_t h, uint32_t stride)
+{
+  uint64_t size = ((uint64_t)stride * h + 0xffff) & ~0xffffULL;
+  uc_err   err  = uc_mem_map_ptr (m->uc, FB_BASE, size, UC_PROT_READ | UC_PROT_WRITE, fb);
+
+  if (err) {
+    host_log ("x64e: framebuffer map: %s\n", uc_strerror (err));
+    return -1;
+  }
+
+  m->fb        = fb;
+  m->fb_w      = w;
+  m->fb_h      = h;
+  m->fb_stride = stride;
+  return 0;
+}
+
 /* attach a disk as virtio-blk (slots 2, 3; IRQ 11, 10) */
 int
 machine_add_disk (machine_t *m, void *disk, uint64_t size, int readonly)

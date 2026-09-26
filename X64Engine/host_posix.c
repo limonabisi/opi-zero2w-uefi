@@ -46,9 +46,43 @@ host_console_read (void)
   return -1;
 }
 
+static machine_t *fb_machine;
+
+static void
+fb_dump (void)
+{
+  static uint64_t last;
+  uint64_t        now = host_now_ns ();
+  FILE           *f;
+  uint32_t        x, y;
+
+  if (!fb_machine || !fb_machine->fb || !getenv ("X64E_FBDUMP") || now - last < 2000000000ULL) {
+    return;
+  }
+
+  last = now;
+  f    = fopen (getenv ("X64E_FBDUMP"), "wb");
+  if (!f) {
+    return;
+  }
+
+  fprintf (f, "P6\n%u %u\n255\n", fb_machine->fb_w, fb_machine->fb_h);
+  for (y = 0; y < fb_machine->fb_h; y++) {
+    for (x = 0; x < fb_machine->fb_w; x++) {
+      uint8_t *p = fb_machine->fb + y * fb_machine->fb_stride + x * 4;
+      fputc (p[2], f);
+      fputc (p[1], f);
+      fputc (p[0], f);
+    }
+  }
+
+  fclose (f);
+}
+
 void
 host_idle_until (uint64_t deadline)
 {
+  fb_dump ();
   uint64_t      now = host_now_ns ();
   struct pollfd p   = { 0, POLLIN, 0 };
 
@@ -184,6 +218,14 @@ main (int argc, char **argv)
   clock_gettime (CLOCK_REALTIME, &ts);
   m.boot_ns = (uint64_t)ts.tv_sec * 1000000000ULL;
 
+  /* X64E_FB=WxH: framebuffer, dumped to X64E_FBDUMP (PPM) every 2 s */
+  if (getenv ("X64E_FB")) {
+    unsigned w = 1024, h = 768;
+
+    sscanf (getenv ("X64E_FB"), "%ux%u", &w, &h);
+    machine_set_fb (&m, host_alloc ((size_t)w * h * 4 + 0x10000), w, h, w * 4);
+  }
+
   /* X64E_DISK=file[:ro] (comma separated, up to two) */
   if (getenv ("X64E_DISK")) {
     char *list = strdup (getenv ("X64E_DISK")), *tok, *save;
@@ -247,6 +289,8 @@ main (int argc, char **argv)
     tcsetattr (0, TCSANOW, &tio);
   }
 
+  m.console_to_kbd = getenv ("X64E_KBD") != NULL;
+  fb_machine = &m;
   machine_run (&m);
   return 0;
 }

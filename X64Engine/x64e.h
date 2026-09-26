@@ -74,7 +74,7 @@ void     uart_poll_input (machine_t *m);
 
 /* --------------------------------------------------------- i8042 ---- */
 typedef struct {
-  uint8_t q[64];
+  uint8_t q[256];
   uint8_t head, tail;
   uint8_t out, obf, ccb, pending, kbd_param, scanning, last_was_cmd, irq_level;
 } i8042_t;
@@ -83,6 +83,11 @@ void     i8042_init (machine_t *m);
 uint32_t i8042_io_read (machine_t *m, uint16_t port);
 void     i8042_io_write (machine_t *m, uint16_t port, uint8_t val);
 void     i8042_key (machine_t *m, uint8_t code);
+
+enum { KEY_UP = 0x100, KEY_DOWN, KEY_RIGHT, KEY_LEFT, KEY_HOME, KEY_END, KEY_INSERT,
+       KEY_DELETE, KEY_PGUP, KEY_PGDN, KEY_F1 };
+void     kbd_type_char (machine_t *m, int c);
+void     kbd_type_key (machine_t *m, int key);
 
 /* ------------------------------------------------------------ pci ---- */
 typedef struct {
@@ -162,11 +167,15 @@ struct machine {
   uart_t      uart;
   i8042_t     kbd;
   int         reset_request;
+  int         console_to_kbd;     /* host console input goes to the PS/2 keyboard */
   pci_dev_t  *pci[8];
   int         npci;
   uint32_t    pci_addr;
   vblk_t      vblk[2];
   int         nvblk;
+  /* linear framebuffer (guest physical FB_BASE) */
+  uint8_t    *fb;
+  uint32_t    fb_w, fb_h, fb_stride;
   uint8_t     cmos_index;
   uint8_t     cmos[128];
   uint64_t    boot_ns;
@@ -181,6 +190,8 @@ int linux_boot_setup (machine_t *m, const uint8_t *kernel, size_t ksize,
 int  machine_init (machine_t *m, uint64_t ram_mb);
 void machine_dump (machine_t *m, const char *why);
 int  machine_add_disk (machine_t *m, void *disk, uint64_t size, int readonly);
+int  machine_set_fb (machine_t *m, void *fb, uint32_t w, uint32_t h, uint32_t stride);
+#define FB_BASE  0xe0000000ULL
 int  machine_v2p (machine_t *m, uint64_t va, uint64_t *pa);
 void machine_run (machine_t *m);
 
