@@ -1,0 +1,18 @@
+diff --git a/qemu/target/i386/unicorn.c b/qemu/target/i386/unicorn.c
+index 8dd0271..61ae52d 100644
+--- a/qemu/target/i386/unicorn.c
++++ b/qemu/target/i386/unicorn.c
+@@ -71,6 +71,13 @@ void x86_reg_reset(struct uc_struct *uc)
+ 
+     env->features[FEAT_1_EDX] = CPUID_CX8 | CPUID_CMOV | CPUID_SSE2 |
+                                 CPUID_FXSR | CPUID_SSE | CPUID_CLFLUSH;
++#ifdef UNICORN_FOR_EFI
++    /*
++     * x86-64 UEFI boot loaders (e.g. GRUB) refuse to run without a TSC
++     * ("no TSC found"); RDTSC is emulated from the host counter anyway.
++     */
++    env->features[FEAT_1_EDX] |= CPUID_FP87 | CPUID_TSC;
++#endif
+     env->features[FEAT_1_ECX] = CPUID_EXT_SSSE3 | CPUID_EXT_SSE41 |
+                                 CPUID_EXT_SSE42 | CPUID_EXT_AES |
+                                 CPUID_EXT_CX16;

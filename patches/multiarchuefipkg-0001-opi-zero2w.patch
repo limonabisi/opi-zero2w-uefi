@@ -1,0 +1,201 @@
+diff --git a/Drivers/Emulator/AARCH64/Emulator.c b/Drivers/Emulator/AARCH64/Emulator.c
+index dac2c84..8beb29e 100644
+--- a/Drivers/Emulator/AARCH64/Emulator.c
++++ b/Drivers/Emulator/AARCH64/Emulator.c
+@@ -11,7 +11,6 @@
+ **/
+ 
+ #include "Emulator.h"
+-#include <Library/DefaultExceptionHandlerLib.h>
+ 
+ extern CONST UINT64  EmulatorThunk[];
+ 
+@@ -67,7 +66,9 @@ EmulatorSyncExceptionCallback (
+   }
+ 
+   EmulatorDump ();
+-  DefaultExceptionHandler (ExceptionType, SystemContext);
++  DEBUG ((DEBUG_ERROR, "Emulator: unhandled synchronous exception, ESR 0x%lx ELR 0x%lx FAR 0x%lx\n",
++          AArch64Context->ESR, AArch64Context->ELR, AArch64Context->FAR));
++  CpuDeadLoop ();
+ }
+ 
+ EFI_STATUS
+diff --git a/Drivers/Emulator/Cpu.c b/Drivers/Emulator/Cpu.c
+index c529515..7a16bb5 100644
+--- a/Drivers/Emulator/Cpu.c
++++ b/Drivers/Emulator/Cpu.c
+@@ -110,6 +110,15 @@ CpuIoReadCb (
+ {
+   UINT32  Result = 0;
+ 
++  if ((gCpuIo2 == NULL) && (Port == 0x61) && (Size == 1)) {
++    /*
++     * No legacy PC hardware here. Report the PIT channel 2 output as
++     * already high, so PIT-based TSC calibration (GRUB) gives up at once
++     * and falls back to UEFI Stall() instead of polling forever.
++     */
++    return 0x20;
++  }
++
+   if (gCpuIo2 != NULL) {
+     switch (Size) {
+       case 1:
+@@ -886,7 +895,7 @@ CpuInitEx (
+             Cpu->UE,
+             EFI_PAGE_SIZE,
+             (1UL << 48) - EFI_PAGE_SIZE,
+-            UC_PROT_READ | UC_PROT_WRITE,
++            UC_PROT_ALL,              // code outside PE images (GRUB modules) must be fetchable
+             (VOID *)EFI_PAGE_SIZE
+             );
+   if (UcErr != UC_ERR_OK) {
+diff --git a/Drivers/Emulator/Emulator.c b/Drivers/Emulator/Emulator.c
+index e2d9323..af6b629 100644
+--- a/Drivers/Emulator/Emulator.c
++++ b/Drivers/Emulator/Emulator.c
+@@ -12,6 +12,11 @@
+ 
+ #include "Emulator.h"
+ 
++BOOLEAN
++EmulatorIsNativeImageAddress (
++  IN  UINT64  Address
++  );
++
+ BOOLEAN
+ EmulatorIsNativeCall (
+   IN  UINT64  ProgramCounter
+@@ -29,7 +34,55 @@ EmulatorIsNativeCall (
+     return FALSE;
+   }
+ 
+-  return TRUE;
++  /*
++   * Native code lives in native (AArch64) images. Anything else reached
++   * from emulated code is emulated code outside a PE image, e.g. modules
++   * a boot loader such as GRUB loads into allocated memory.
++   */
++  return EmulatorIsNativeImageAddress (ProgramCounter);
++}
++
++BOOLEAN
++EmulatorIsNativeImageAddress (
++  IN  UINT64  Address
++  )
++{
++  STATIC EFI_DEBUG_IMAGE_INFO_TABLE_HEADER  *Table;
++  STATIC UINT64                             LastBase;
++  STATIC UINT64                             LastEnd;
++  EFI_DEBUG_IMAGE_INFO                      *Info;
++  EFI_LOADED_IMAGE_PROTOCOL                 *Li;
++  UINT32                                    Index;
++  UINT64                                    Base;
++
++  if ((Address >= LastBase) && (Address < LastEnd)) {
++    return TRUE;
++  }
++
++  if ((Table == NULL) &&
++      EFI_ERROR (EfiGetSystemConfigurationTable (&gEfiDebugImageInfoTableGuid, (VOID **)&Table)))
++  {
++    return TRUE;            // no table: keep the old behaviour
++  }
++
++  Info = Table->EfiDebugImageInfoTable;
++  for (Index = 0; Index < Table->TableSize; Index++) {
++    if ((Info[Index].NormalImage == NULL) ||
++        (Info[Index].NormalImage->ImageInfoType != EFI_DEBUG_IMAGE_INFO_TYPE_NORMAL))
++    {
++      continue;
++    }
++
++    Li   = Info[Index].NormalImage->LoadedImageProtocolInstance;
++    Base = (UINT64)(UINTN)Li->ImageBase;
++    if ((Address >= Base) && (Address < Base + Li->ImageSize)) {
++      LastBase = Base;
++      LastEnd  = Base + Li->ImageSize;
++      return TRUE;
++    }
++  }
++
++  return FALSE;
+ }
+ 
+ #ifdef MAU_SUPPORTS_X64_BINS
+diff --git a/Drivers/Emulator/Emulator.h b/Drivers/Emulator/Emulator.h
+index 6a5c5de..a67c709 100644
+--- a/Drivers/Emulator/Emulator.h
++++ b/Drivers/Emulator/Emulator.h
+@@ -27,6 +27,7 @@
+ #include <Protocol/DebugSupport.h>
+ #include <Protocol/PeCoffImageEmulator.h>
+ #include <Protocol/LoadedImage.h>
++#include <Guid/DebugImageInfoTable.h>
+ #include <Protocol/EmuTestProtocol.h>
+ 
+ /*
+diff --git a/Drivers/Emulator/Emulator.inf b/Drivers/Emulator/Emulator.inf
+index b631ffb..1d3bd01 100644
+--- a/Drivers/Emulator/Emulator.inf
++++ b/Drivers/Emulator/Emulator.inf
+@@ -60,7 +60,6 @@
+   CpuExceptionHandlerLib
+ 
+ [LibraryClasses.AARCH64]
+-  DefaultExceptionHandlerLib
+ 
+ [LibraryClasses]
+   BaseLib
+@@ -73,6 +72,9 @@
+   UnicornEngineLib
+   UefiLib
+ 
++[Guids]
++  gEfiDebugImageInfoTableGuid
++
+ [Protocols]
+   gEfiLoadedImageProtocolGuid             ## CONSUMES
+   gEfiCpuArchProtocolGuid                 ## CONSUMES
+diff --git a/Emulator.dsc b/Emulator.dsc
+index 398314c..977b00b 100644
+--- a/Emulator.dsc
++++ b/Emulator.dsc
+@@ -157,7 +157,16 @@
+   # Since software stack checking may be heuristically enabled by the compiler
+   # include BaseStackCheckLib unconditionally.
+   #
+-  NULL|MdePkg/Library/BaseStackCheckLib/BaseStackCheckLib.inf
++  NULL|MdePkg/Library/StackCheckLib/StackCheckLib.inf
++  SafeIntLib|MdePkg/Library/BaseSafeIntLib/BaseSafeIntLib.inf
++  SynchronizationLib|MdePkg/Library/BaseSynchronizationLib/BaseSynchronizationLib.inf
++  RegisterFilterLib|MdePkg/Library/RegisterFilterLibNull/RegisterFilterLibNull.inf
++  CpuLib|MdePkg/Library/BaseCpuLib/BaseCpuLib.inf
++  ArmMmuLib|UefiCpuPkg/Library/ArmMmuLib/ArmMmuBaseLib.inf
++  CacheMaintenanceLib|ArmPkg/Library/ArmCacheMaintenanceLib/ArmCacheMaintenanceLib.inf
++  ArmSmcLib|MdePkg/Library/ArmSmcLib/ArmSmcLib.inf
++  ArmHvcLib|ArmPkg/Library/ArmHvcLib/ArmHvcLib.inf
++  StackCheckFailureHookLib|MdePkg/Library/StackCheckFailureHookLibNull/StackCheckFailureHookLibNull.inf
+   #
+   # Misc.
+   #
+@@ -187,16 +196,14 @@
+ !endif
+ 
+ [LibraryClasses.AARCH64]
+-  ArmDisassemblerLib|ArmPkg/Library/ArmDisassemblerLib/ArmDisassemblerLib.inf
+-  DefaultExceptionHandlerLib|ArmPkg/Library/DefaultExceptionHandlerLib/DefaultExceptionHandlerLib.inf
+-  NULL|ArmPkg/Library/CompilerIntrinsicsLib/CompilerIntrinsicsLib.inf
+-  ArmLib|ArmPkg/Library/ArmLib/ArmBaseLib.inf
++  NULL|MdePkg/Library/CompilerIntrinsicsLib/CompilerIntrinsicsLib.inf
++  ArmLib|MdePkg/Library/ArmLib/ArmBaseLib.inf
+   #
+   # It is not possible to prevent ARM compiler calls to generic intrinsic functions.
+   # This library provides the instrinsic functions generated by a given compiler.
+   # [LibraryClasses.ARM] and NULL mean link this library into all ARM images.
+   #
+-  NULL|ArmPkg/Library/CompilerIntrinsicsLib/CompilerIntrinsicsLib.inf
++  NULL|MdePkg/Library/CompilerIntrinsicsLib/CompilerIntrinsicsLib.inf
+   TimerLib|ArmPkg/Library/ArmArchTimerLib/ArmArchTimerLib.inf
+   ArmGenericTimerCounterLib|ArmPkg/Library/ArmGenericTimerPhyCounterLib/ArmGenericTimerPhyCounterLib.inf
+   CacheMaintenanceLib|ArmPkg/Library/ArmCacheMaintenanceLib/ArmCacheMaintenanceLib.inf

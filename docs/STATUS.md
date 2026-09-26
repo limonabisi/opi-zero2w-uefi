@@ -7,7 +7,7 @@
 State: Active
 Codename: opizero2w
 SoC: Allwinner H618 (4x Cortex-A53, 1 GB LPDDR4)
-Version: 0.8.3-h618
+Version: 0.9.0-h618
 
 Contributors: limonabisi
 
@@ -39,7 +39,8 @@ Legend: ✅ Working · ⚠️ Partially working · ❌ Not working · ❓ Not te
 | SPI Flash | Boot from SPI not supported | ❌ |
 | Network Boot | No Ethernet on the board, no USB NIC driver | ❌ |
 | TPM | No hardware TPM | ❌ |
-| Windows Boot | | ❓ |
+| Windows Boot | Windows 10 ARM64 from a USB drive | ✅ |
+| x64 Bridge | x86-64 UEFI apps and boot loaders (Shell, GRUB), not x86-64 OS kernels | ⚠️ |
 | Linux Boot | Needs Device Tree mode | ❌ |
 
 ## OS Status
@@ -48,11 +49,11 @@ Legend: ✅ Working · ⚠️ Partially working · ❌ Not working · ❓ Not te
 
 | Feature | Description | State |
 |---|---|---|
-| Boot | Windows 10 22H2 ARM64 | ❓ |
-| CPU | 4 cores via PSCI | ❓ |
-| Display | Framebuffer only (Basic Display) | ❓ |
-| USB Host Mode | Inbox EHCI / OHCI drivers | ❓ |
-| Mass Storage | Windows must be installed on a USB drive | ❓ |
+| Boot | Windows 10 22H2 ARM64, from a USB drive | ✅ |
+| CPU | 4 cores via PSCI | ✅ |
+| Display | Framebuffer only (Basic Display) | ✅ |
+| USB Host Mode | Inbox EHCI / OHCI drivers, keyboard and USB drive | ✅ |
+| Mass Storage | Windows must be installed on a USB drive | ✅ |
 | microSD | Controller is not SDHCI, no driver | ❌ |
 | USB Device Mode | | ❌ |
 | WLAN | | ❌ |

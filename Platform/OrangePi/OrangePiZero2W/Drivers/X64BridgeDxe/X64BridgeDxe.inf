@@ -1,0 +1,37 @@
+## @file
+#  x64 Bridge: starts the x86-64 UEFI emulator when enabled in setup.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = X64BridgeDxe
+  FILE_GUID                      = 8f3b6d27-41ac-4e59-9c07-2d6e1a5b7c48
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = X64BridgeDxeInitialize
+
+[Sources]
+  X64BridgeDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  Silicon/Allwinner/H616Pkg/H616Pkg.dec
+
+[LibraryClasses]
+  BaseMemoryLib
+  DebugLib
+  DevicePathLib
+  MemoryAllocationLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+  UefiLib
+  UefiRuntimeServicesTableLib
+
+[Protocols]
+  gEfiFirmwareVolume2ProtocolGuid
+
+[Depex]
+  gEfiVariableArchProtocolGuid AND gEfiCpuArchProtocolGuid

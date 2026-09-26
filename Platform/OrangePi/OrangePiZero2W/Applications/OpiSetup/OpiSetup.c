@@ -18,6 +18,10 @@
 #include <Library/UefiBootManagerLib.h>
 #include <Protocol/LoadedImage.h>
 #include <Protocol/SimpleTextInEx.h>
+#include <Protocol/SimpleFileSystem.h>
+#include <Protocol/BlockIo.h>
+#include <Protocol/PeCoffImageEmulator.h>
+#include <Guid/FileInfo.h>
 #include <Protocol/SunxiCpuThermal.h>
 
 //
@@ -105,6 +109,7 @@ STATIC INT32       mTimeout, mTimeoutOrig;
 STATIC UINTN       mLang, mLangOrig;
 STATIC UINTN       mSecureBoot, mSecureBootOrig;
 STATIC UINTN       mCpuSpeed, mCpuSpeedOrig;
+STATIC UINTN       mX64Bridge, mX64BridgeOrig;
 STATIC SUNXI_CPU_THERMAL_PROTOCOL  *mCpu;
 STATIC CHAR16      mCpuMaxLabel[40];
 STATIC CHAR16      mTempStr[40];
@@ -299,6 +304,13 @@ BuildPage (
       It->Options[1] = L"1008 MHz";
       It->Options[2] = L"1200 MHz";
       It->OptCount   = 3;
+      Add (ItSection, S (StrCompatSec));
+      It             = Add (ItChoice, S (StrX64Bridge));
+      It->Desc       = S (StrX64Desc);
+      It->Choice     = &mX64Bridge;
+      It->Options[0] = S (StrSbOff);
+      It->Options[1] = S (StrSbOn);
+      It->OptCount   = 2;
       break;
 
     case PAGE_DATETIME:
@@ -467,6 +479,12 @@ LoadSettings (
   gRT->GetVariable (L"CpuSpeed", &mSetupVarGuid, NULL, &Size, &B);
   mCpuSpeed     = (B <= 2) ? B : 0;
   mCpuSpeedOrig = mCpuSpeed;
+
+  Size = 1;
+  B    = 0;
+  gRT->GetVariable (L"X64Bridge", &mSetupVarGuid, NULL, &Size, &B);
+  mX64Bridge     = (B != 0) ? 1 : 0;
+  mX64BridgeOrig = mX64Bridge;
   mSecureBootOrig = mSecureBoot;
 
   //
@@ -537,7 +555,7 @@ Dirty (
 {
   return (mHdmiMode != mHdmiModeOrig) || (mTimeout != mTimeoutOrig) ||
          (mLang != mLangOrig) || (mSecureBoot != mSecureBootOrig) ||
-         (mCpuSpeed != mCpuSpeedOrig) || BootOrderChanged () || TimeChanged ();
+         (mCpuSpeed != mCpuSpeedOrig) || (mX64Bridge != mX64BridgeOrig) || BootOrderChanged () || TimeChanged ();
 }
 
 STATIC
@@ -565,6 +583,10 @@ SaveSettings (
   B = (UINT8)mCpuSpeed;
   gRT->SetVariable (L"CpuSpeed", &mSetupVarGuid, EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS, 1, &B);
   mCpuSpeedOrig = mCpuSpeed;
+
+  B = (UINT8)mX64Bridge;
+  gRT->SetVariable (L"X64Bridge", &mSetupVarGuid, EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS, 1, &B);
+  mX64BridgeOrig = mX64Bridge;
 
 
   if (BootOrderChanged ()) {
@@ -1249,7 +1271,7 @@ DoAction (
   BOOLEAN   HdmiChanged;
 
   HdmiChanged = (BOOLEAN)((mHdmiMode != mHdmiModeOrig) || (mSecureBoot != mSecureBootOrig) ||
-                          (mCpuSpeed != mCpuSpeedOrig));
+                          (mCpuSpeed != mCpuSpeedOrig) || (mX64Bridge != mX64BridgeOrig));
 
   switch (Action) {
     case ActSaveExit:
@@ -1430,13 +1452,138 @@ STATIC UINTN    mBmSel;
 #define BM_W      600
 #define BM_ROW_H  52
 
+//
+// x64 Bridge: x86-64 boot loaders (\EFI\BOOT\BOOTX64.EFI) on removable or
+// fixed media, offered in the boot menu while the x86-64 emulator is running.
+//
+#define MAX_X64  8
+
+STATIC EFI_HANDLE  mX64Fs[MAX_X64];
+STATIC CHAR16      mX64Desc[MAX_X64][64];
+STATIC UINTN       mX64Count;
+
+STATIC
+BOOLEAN
+X64BridgeActive (
+  VOID
+  )
+{
+  VOID  *Emu;
+
+  return !EFI_ERROR (gBS->LocateProtocol (&gEdkiiPeCoffImageEmulatorProtocolGuid, NULL, &Emu));
+}
+
+STATIC
+VOID
+ScanX64Loaders (
+  VOID
+  )
+{
+  EFI_HANDLE                       *Handles;
+  UINTN                            Count;
+  UINTN                            Index;
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *Fs;
+  EFI_FILE_PROTOCOL                *Root;
+  EFI_FILE_PROTOCOL                *File;
+  EFI_BLOCK_IO_PROTOCOL            *BlockIo;
+  EFI_DEVICE_PATH_PROTOCOL         *Dp;
+  EFI_DEVICE_PATH_PROTOCOL         *Node;
+  CONST CHAR16                     *Kind;
+
+  mX64Count = 0;
+  if (!X64BridgeActive () ||
+      EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &Count, &Handles)))
+  {
+    return;
+  }
+
+  for (Index = 0; Index < Count && mX64Count < MAX_X64; Index++) {
+    if (EFI_ERROR (gBS->HandleProtocol (Handles[Index], &gEfiSimpleFileSystemProtocolGuid, (VOID **)&Fs)) ||
+        EFI_ERROR (Fs->OpenVolume (Fs, &Root)))
+    {
+      continue;
+    }
+
+    if (!EFI_ERROR (Root->Open (Root, &File, L"\\EFI\\BOOT\\BOOTX64.EFI", EFI_FILE_MODE_READ, 0))) {
+      File->Close (File);
+      Kind = L"microSD";
+      Dp   = DevicePathFromHandle (Handles[Index]);
+      for (Node = Dp; Node != NULL && !IsDevicePathEnd (Node); Node = NextDevicePathNode (Node)) {
+        if ((DevicePathType (Node) == MESSAGING_DEVICE_PATH) && (DevicePathSubType (Node) == MSG_USB_DP)) {
+          Kind = L"USB";
+        }
+      }
+
+      if (!EFI_ERROR (gBS->HandleProtocol (Handles[Index], &gEfiBlockIoProtocolGuid, (VOID **)&BlockIo)) &&
+          (BlockIo->Media->BlockSize == 2048))
+      {
+        Kind = L"USB CD/ISO";
+      }
+
+      mX64Fs[mX64Count] = Handles[Index];
+      UnicodeSPrint (mX64Desc[mX64Count], sizeof (mX64Desc[0]), L"%s  ·  x86-64 boot loader", Kind);
+      mX64Count++;
+    }
+
+    Root->Close (Root);
+  }
+
+  FreePool (Handles);
+}
+
+STATIC
+UINTN
+BmDevCount (
+  VOID
+  )
+{
+  return mBootCount + mX64Count;
+}
+
+STATIC
+CONST CHAR16 *
+BmDevLabel (
+  UINTN  I
+  )
+{
+  return (I < mBootCount) ? mBoot[I].Desc : mX64Desc[I - mBootCount];
+}
+
+STATIC
+VOID
+BootX64 (
+  UINTN  I
+  )
+{
+  EFI_DEVICE_PATH_PROTOCOL  *Dp;
+  EFI_HANDLE                Image;
+  EFI_STATUS                Status;
+
+  Dp = FileDevicePath (mX64Fs[I], L"\\EFI\\BOOT\\BOOTX64.EFI");
+  if (Dp == NULL) {
+    return;
+  }
+
+  gST->ConOut->ClearScreen (gST->ConOut);
+  Status = gBS->LoadImage (TRUE, mImageHandle, Dp, NULL, 0, &Image);
+  if (!EFI_ERROR (Status)) {
+    Status = gBS->StartImage (Image, NULL, NULL);
+  }
+
+  FreePool (Dp);
+  if (EFI_ERROR (Status)) {
+    Render ();
+    Dialog (S (StrOneTime), S (StrBootFailed), S (StrOk), NULL);
+  }
+}
+
 STATIC
 UINTN
 BootMenuCount (
   VOID
   )
 {
-  return mBootCount + 2;          // + "Setup" + "UEFI Shell"
+  return BmDevCount () + 2;       // + "Setup" + "UEFI Shell"
 }
 
 STATIC
@@ -1460,9 +1607,9 @@ DrawBootMenu (
   //
   P     = BM_ROW_H + 6;
   Avail = gCanvas.H - 112 - 64;
-  Dev   = (mBootCount == 0) ? 1 : (INT32)mBootCount;
+  Dev   = (BmDevCount () == 0) ? 1 : (INT32)BmDevCount ();
   Vis   = MAX (1, MIN (Dev, (Avail - (112 + 28 + 2 * P + 18)) / P));
-  if ((INT32)mBmSel < (INT32)mBootCount) {
+  if ((INT32)mBmSel < (INT32)BmDevCount ()) {
     if ((INT32)mBmSel < mBmTop) {
       mBmTop = (INT32)mBmSel;
     } else if ((INT32)mBmSel >= mBmTop + Vis) {
@@ -1494,29 +1641,29 @@ DrawBootMenu (
   }
 
   Y += 112;
-  if (mBootCount == 0) {
+  if (BmDevCount () == 0) {
     GfxText (gFontBody, X + 32, Y + 14, S (StrNoStorage), COL_TEXT_2);
     Y += P;
   }
 
   for (I = mBmTop; I < (INT32)BootMenuCount (); I++) {
-    if ((I < (INT32)mBootCount) && (I >= mBmTop + Vis)) {
+    if ((I < (INT32)BmDevCount ()) && (I >= mBmTop + Vis)) {
       continue;
     }
 
-    if (I == (INT32)mBootCount) {
+    if (I == (INT32)BmDevCount ()) {
       GfxFill (X + 24, Y + 10, BM_W - 48, 1, COL_LINE);
       Y += 28;
     }
 
     Sel   = (I == (INT32)mBmSel);
-    Label = (I < (INT32)mBootCount) ? mBoot[I].Desc : (I == (INT32)mBootCount) ? S (StrEnterSetup) : S (StrShell);
+    Label = (I < (INT32)BmDevCount ()) ? BmDevLabel ((UINTN)I) : (I == (INT32)BmDevCount ()) ? S (StrEnterSetup) : S (StrShell);
     if (Sel) {
       GfxRoundRect (X + 16, Y, BM_W - 32, BM_ROW_H, 10, COL_ACCENT_SOFT);
       GfxRoundRect (X + 16, Y + 13, 4, BM_ROW_H - 26, 2, COL_ACCENT);
     }
 
-    if (I < (INT32)mBootCount) {
+    if (I < (INT32)BmDevCount ()) {
       GfxCircle (X + 48, Y + BM_ROW_H / 2, 13, Sel ? COL_ACCENT : COL_LINE);
       UnicodeSPrint (Num, sizeof (Num), L"%d", I + 1);
       GfxText (
@@ -1527,7 +1674,7 @@ DrawBootMenu (
         Sel ? COL_WHITE : COL_TEXT_2
         );
     } else {
-      GfxAlpha ((I == (INT32)mBootCount) ? gIconSliders : gIconStartup, X + 37, Y + (BM_ROW_H - 22) / 2, Sel ? COL_ACCENT : COL_TEXT_2);
+      GfxAlpha ((I == (INT32)BmDevCount ()) ? gIconSliders : gIconStartup, X + 37, Y + (BM_ROW_H - 22) / 2, Sel ? COL_ACCENT : COL_TEXT_2);
     }
 
     GfxText (gFontMedium, X + 76, Y + (BM_ROW_H - gFontMedium->LineHeight) / 2 + 1, Label, COL_TEXT);
@@ -1578,7 +1725,9 @@ RunBootMenu (
   mBootMenuActive = TRUE;
   DrawBootMenuHook = DrawBootMenu;
   mBmSel          = 0;
-  DEBUG ((DEBUG_ERROR, "OpiSetup: boot menu\n"));
+  gST->ConIn->Reset (gST->ConIn, FALSE);   // drop the ESC presses that opened the menu
+  ScanX64Loaders ();
+  DEBUG ((DEBUG_ERROR, "OpiSetup: boot menu (%u x64 loaders)\n", mX64Count));
   for ( ; ; ) {
     Render ();
     Present ();
@@ -1598,12 +1747,14 @@ RunBootMenu (
     } else if (Key.ScanCode == SCAN_ESC) {
       mBootMenu = mBootMenuActive = FALSE;
       return FALSE;
-    } else if ((Key.ScanCode == SCAN_F2) || ((Key.UnicodeChar == CHAR_CARRIAGE_RETURN) && (mBmSel == mBootCount))) {
+    } else if ((Key.ScanCode == SCAN_F2) || ((Key.UnicodeChar == CHAR_CARRIAGE_RETURN) && (mBmSel == BmDevCount ()))) {
       mBootMenu = mBootMenuActive = FALSE;
       return TRUE;
     } else if (Key.UnicodeChar == CHAR_CARRIAGE_RETURN) {
       if (mBmSel < mBootCount) {
         BootOption (mBoot[mBmSel].Number);
+      } else if (mBmSel < BmDevCount ()) {
+        BootX64 (mBmSel - mBootCount);
       } else {
         StartFvApp (&mShellGuid);
       }

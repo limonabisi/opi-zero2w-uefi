@@ -210,7 +210,7 @@
 
 [PcdsFixedAtBuild.common]
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"Orange Pi Zero 2W EDK2 port"
-  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.8.3-h618"
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.9.0-h618"
 
   gEfiMdePkgTokenSpaceGuid.PcdMaximumUnicodeStringLength|1000000
   gEfiMdePkgTokenSpaceGuid.PcdMaximumAsciiStringLength|1000000
@@ -445,6 +445,12 @@
   Silicon/Allwinner/H616Pkg/Drivers/SunxiCpuThermalDxe/SunxiCpuThermalDxe.inf
 !endif
   Platform/OrangePi/OrangePiZero2W/Drivers/PlatformSmbiosDxe/PlatformSmbiosDxe.inf
+  Platform/OrangePi/OrangePiZero2W/Drivers/X64BridgeDxe/X64BridgeDxe.inf {
+    <BuildOptions>
+!ifdef X64_BRIDGE_ON
+      *_*_*_CC_FLAGS = -DX64_BRIDGE_DEFAULT=1
+!endif
+  }
 
   #
   # USB host (EHCI1 = second USB-C port) + keyboard / mass storage

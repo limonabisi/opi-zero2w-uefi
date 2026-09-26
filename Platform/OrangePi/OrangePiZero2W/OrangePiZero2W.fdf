@@ -159,6 +159,14 @@ READ_LOCK_STATUS   = TRUE
   INF MdeModulePkg/Universal/SmbiosDxe/SmbiosDxe.inf
   INF Silicon/Allwinner/H616Pkg/Drivers/SunxiCpuThermalDxe/SunxiCpuThermalDxe.inf
   INF Platform/OrangePi/OrangePiZero2W/Drivers/PlatformSmbiosDxe/PlatformSmbiosDxe.inf
+
+  # x64 Bridge: x86-64 UEFI emulator (intel/MultiArchUefiPkg, built by
+  # scripts/build-emulator.sh), started by X64BridgeDxe when enabled in setup
+  INF Platform/OrangePi/OrangePiZero2W/Drivers/X64BridgeDxe/X64BridgeDxe.inf
+  FILE FREEFORM = 5c2a7e41-93b6-4f0d-8e2a-1b7c9d4e6f30 {
+    SECTION PE32 = Platform/OrangePi/OrangePiZero2W/Binaries/EmulatorDxe/EmulatorDxe.efi
+    SECTION UI = "X64Emulator"
+  }
   FILE FREEFORM = 65f00053-da6b-4367-8ccf-13949db64027 {
     SECTION RAW = Platform/OrangePi/OrangePiZero2W/DeviceTree/sun50i-h618-orangepi-zero2w.dtb
   }
