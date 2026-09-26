@@ -23,9 +23,12 @@
   UefiDriverEntryPoint
   VirtioMmioDeviceLib
   NonDiscoverableDeviceRegistrationLib
+  FrameBufferBltLib
+  BaseMemoryLib
 
 [Protocols]
   gEfiDevicePathProtocolGuid
+  gEfiGraphicsOutputProtocolGuid
 
 [Depex]
   TRUE

@@ -1,0 +1,51 @@
+## @file
+#  OpiSetup - graphical firmware setup for the Orange Pi Zero 2W.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION    = 0x0001001B
+  BASE_NAME      = OpiSetup
+  FILE_GUID      = b7a1c3e0-5d42-4f8b-9c16-0e2a7f4d6b83
+  MODULE_TYPE    = UEFI_APPLICATION
+  VERSION_STRING = 1.0
+  ENTRY_POINT    = OpiSetupMain
+
+[Sources]
+  OpiSetup.h
+  Assets.h
+  OpiSetup.c
+  Gfx.c
+  Strings.c
+  SysInfo.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  DevicePathLib
+  MemoryAllocationLib
+  PcdLib
+  PrintLib
+  UefiApplicationEntryPoint
+  UefiBootManagerLib
+  UefiBootServicesTableLib
+  UefiLib
+  UefiRuntimeServicesTableLib
+
+[Protocols]
+  gEfiBlockIoProtocolGuid
+  gEfiGraphicsOutputProtocolGuid
+  gEfiLoadedImageProtocolGuid
+  gEfiSmbiosProtocolGuid
+
+[Guids]
+  gEfiGlobalVariableGuid
+
+[Pcd]
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString

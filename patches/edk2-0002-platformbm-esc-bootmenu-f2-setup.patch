@@ -1,0 +1,146 @@
+diff --git a/ArmPkg/Library/PlatformBootManagerLib/PlatformBm.c b/ArmPkg/Library/PlatformBootManagerLib/PlatformBm.c
+index ea093bb..6eb5cd5 100644
+--- a/ArmPkg/Library/PlatformBootManagerLib/PlatformBm.c
++++ b/ArmPkg/Library/PlatformBootManagerLib/PlatformBm.c
+@@ -16,7 +16,10 @@
+ #include <Library/CapsuleLib.h>
+ #include <Library/DevicePathLib.h>
+ #include <Library/HobLib.h>
+-#include <Library/PcdLib.h>
++#include <Library/PcdLib.h>
++#include <Library/PrintLib.h>
++#include <Library/BaseMemoryLib.h>
++#include <Library/MemoryAllocationLib.h>
+ #include <Library/UefiBootManagerLib.h>
+ #include <Library/UefiLib.h>
+ #include <Library/UefiRuntimeServicesTableLib.h>
+@@ -645,6 +648,51 @@ GetPlatformOptions (
+   FreePool (BootKeys);
+ }
+ 
++/**
++  Point the hot key Key at boot option OptionNumber, replacing an older
++  mapping of the same key (without rewriting the variable when unchanged).
++**/
++STATIC
++VOID
++PlatformSetKeyOption (
++  IN EFI_INPUT_KEY  *Key,
++  IN UINT16         OptionNumber
++  )
++{
++  CHAR16                       Name[16];
++  UINTN                        Index;
++  EFI_KEY_OPTION               *Opt;
++  UINTN                        Size;
++  BOOLEAN                      Have;
++
++  Have = FALSE;
++  for (Index = 0; Index <= 0xFF; Index++) {
++    UnicodeSPrint (Name, sizeof (Name), L"Key%04x", Index);
++    GetEfiGlobalVariable2 (Name, (VOID **)&Opt, &Size);
++    if (Opt == NULL) {
++      continue;
++    }
++
++    if ((Size >= sizeof (EFI_KEY_OPTION) + sizeof (EFI_INPUT_KEY)) &&
++        (Opt->KeyData.Options.InputKeyCount == 1) &&
++        (Opt->KeyData.PackedValue == (1U << 30)) &&
++        (CompareMem (Opt + 1, Key, sizeof (*Key)) == 0))
++    {
++      if (Opt->BootOption == OptionNumber) {
++        Have = TRUE;
++      } else {
++        EfiBootManagerDeleteKeyOptionVariable (NULL, 0, Key, NULL);
++      }
++    }
++
++    FreePool (Opt);
++  }
++
++  if (!Have) {
++    EfiBootManagerAddKeyOptionVariable (NULL, OptionNumber, 0, Key, NULL);
++  }
++}
++
+ STATIC
+ VOID
+ PlatformRegisterOptionsAndKeys (
+@@ -668,7 +716,8 @@ PlatformRegisterOptionsAndKeys (
+   ASSERT_EFI_ERROR (Status);
+ 
+   //
+-  // Map F2 and ESC to Boot Manager Menu
++  // F2 = setup (Boot Manager Menu application), ESC = one-time boot menu
++  // (the same application started with the "bootmenu" load option data)
+   //
+   F2.ScanCode     = SCAN_F2;
+   F2.UnicodeChar  = CHAR_NULL;
+@@ -676,22 +725,42 @@ PlatformRegisterOptionsAndKeys (
+   Esc.UnicodeChar = CHAR_NULL;
+   Status          = EfiBootManagerGetBootManagerMenu (&BootOption);
+   ASSERT_EFI_ERROR (Status);
+-  Status = EfiBootManagerAddKeyOptionVariable (
+-             NULL,
+-             (UINT16)BootOption.OptionNumber,
+-             0,
+-             &F2,
+-             NULL
+-             );
+-  ASSERT (Status == EFI_SUCCESS || Status == EFI_ALREADY_STARTED);
+-  Status = EfiBootManagerAddKeyOptionVariable (
+-             NULL,
+-             (UINT16)BootOption.OptionNumber,
+-             0,
+-             &Esc,
+-             NULL
+-             );
+-  ASSERT (Status == EFI_SUCCESS || Status == EFI_ALREADY_STARTED);
++  PlatformSetKeyOption (&F2, (UINT16)BootOption.OptionNumber);
++
++  if (!EFI_ERROR (Status)) {
++    EFI_BOOT_MANAGER_LOAD_OPTION  MenuOption;
++    EFI_BOOT_MANAGER_LOAD_OPTION  *Options;
++    UINTN                         Count;
++    INTN                          Found;
++    STATIC CONST CHAR16           Data[] = L"bootmenu";
++
++    Status = EfiBootManagerInitializeLoadOption (
++               &MenuOption,
++               LoadOptionNumberUnassigned,
++               LoadOptionTypeBoot,
++               LOAD_OPTION_CATEGORY_APP | LOAD_OPTION_ACTIVE | LOAD_OPTION_HIDDEN,
++               L"Boot Menu",
++               BootOption.FilePath,
++               (UINT8 *)Data,
++               sizeof (Data)
++               );
++    if (!EFI_ERROR (Status)) {
++      Options = EfiBootManagerGetLoadOptions (&Count, LoadOptionTypeBoot);
++      Found   = EfiBootManagerFindLoadOption (&MenuOption, Options, Count);
++      if (Found >= 0) {
++        MenuOption.OptionNumber = Options[Found].OptionNumber;
++      } else {
++        Status = EfiBootManagerAddLoadOptionVariable (&MenuOption, MAX_UINTN);
++      }
++
++      EfiBootManagerFreeLoadOptions (Options, Count);
++      if (!EFI_ERROR (Status)) {
++        PlatformSetKeyOption (&Esc, (UINT16)MenuOption.OptionNumber);
++      }
++
++      EfiBootManagerFreeLoadOption (&MenuOption);
++    }
++  }
+ }
+ 
+ //
+@@ -1089,7 +1158,7 @@ PlatformBootManagerWaitCallback (
+   Status = BootLogoUpdateProgress (
+              White.Pixel,
+              Black.Pixel,
+-             L"Press ESCAPE for boot options",
++             L"ESC: Boot Menu      F2: Setup",
+              White.Pixel,
+              (Timeout - TimeoutRemain) * 100 / Timeout,
+              0
