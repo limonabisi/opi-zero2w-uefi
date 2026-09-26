@@ -21,6 +21,7 @@
 #include <Library/PcdLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Protocol/Smbios.h>
+#include <Protocol/SunxiCpuThermal.h>
 
 #include <H616.h>
 
@@ -186,9 +187,16 @@ AddType4 (
     "Allwinner",
     "H618: 4x Cortex-A53"
   };
-  UINT16              Mhz;
+  UINT16                      Mhz;
+  UINT16                      MaxMhz;
+  SUNXI_CPU_THERMAL_PROTOCOL  *Cpu;
 
-  Mhz = GetCpuMhz ();
+  Mhz    = GetCpuMhz ();
+  MaxMhz = 1512;
+  if (!EFI_ERROR (gBS->LocateProtocol (&gSunxiCpuThermalProtocolGuid, NULL, (VOID **)&Cpu))) {
+    Mhz    = (UINT16)Cpu->CurrentMhz;
+    MaxMhz = (UINT16)Cpu->MaxMhz;
+  }
 
   ZeroMem (&T, sizeof (T));
   T.Hdr.Type                 = EFI_SMBIOS_TYPE_PROCESSOR_INFORMATION;
@@ -199,7 +207,7 @@ AddType4 (
   T.ProcessorFamily2         = ProcessorFamilyARMv8;
   T.ProcessorManufacturer    = 2;
   T.ProcessorVersion         = 3;
-  T.MaxSpeed                 = 1512;
+  T.MaxSpeed                 = MaxMhz;
   T.CurrentSpeed             = Mhz;
   T.ExternalClock            = 24;
   T.Status                   = 0x41;  // socket populated, CPU enabled

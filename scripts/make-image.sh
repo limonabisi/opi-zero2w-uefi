@@ -80,7 +80,6 @@ dd if="$BOOT" of="$IMG" bs=1024 seek=8 conv=notrunc status=none
 PART="$WORK/part.img"; truncate -s $((60*1024*1024)) "$PART"
 mkfs.vfat -F 32 -n OPIZ2WEFI "$PART" >/dev/null
 mmd -i "$PART" ::/EFI ::/EFI/BOOT ::/dtb
-mcopy -i "$PART" "$TOP/sdcard/startup.nsh" ::/startup.nsh
 mcopy -i "$PART" "$DTB" ::/dtb/sun50i-h618-orangepi-zero2w.dtb
 dd if="$PART" of="$IMG" bs=1M seek=4 conv=notrunc status=none
 echo "SD image   : $IMG"

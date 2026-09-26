@@ -25,6 +25,7 @@
   MdePkg/MdePkg.dec
   MdeModulePkg/MdeModulePkg.dec
   SecurityPkg/SecurityPkg.dec
+  Silicon/Allwinner/H616Pkg/H616Pkg.dec
 
 [LibraryClasses]
   BaseLib
@@ -47,6 +48,7 @@
   gEfiGraphicsOutputProtocolGuid
   gEfiLoadedImageProtocolGuid
   gEfiSmbiosProtocolGuid
+  gSunxiCpuThermalProtocolGuid
 
 [Guids]
   gEfiGlobalVariableGuid

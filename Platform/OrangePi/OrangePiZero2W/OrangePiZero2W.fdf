@@ -157,6 +157,7 @@ READ_LOCK_STATUS   = TRUE
 !endif
   INF Platform/OrangePi/OrangePiZero2W/Drivers/FdtDxe/FdtDxe.inf
   INF MdeModulePkg/Universal/SmbiosDxe/SmbiosDxe.inf
+  INF Silicon/Allwinner/H616Pkg/Drivers/SunxiCpuThermalDxe/SunxiCpuThermalDxe.inf
   INF Platform/OrangePi/OrangePiZero2W/Drivers/PlatformSmbiosDxe/PlatformSmbiosDxe.inf
   FILE FREEFORM = 65f00053-da6b-4367-8ccf-13949db64027 {
     SECTION RAW = Platform/OrangePi/OrangePiZero2W/DeviceTree/sun50i-h618-orangepi-zero2w.dtb

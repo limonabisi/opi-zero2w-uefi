@@ -93,7 +93,7 @@ extern CONST ALPHA_BITMAP  *gIconHome, *gIconSliders, *gIconClock, *gIconShield,
 typedef enum {
   StrSetup, StrMain, StrConfig, StrDateTime, StrSecurity, StrStartup, StrExit,
   StrMainSub, StrConfigSub, StrDateTimeSub, StrSecuritySub, StrStartupSub, StrExitSub,
-  StrSystem, StrBoard, StrSoc, StrCpu, StrMemory, StrFirmware, StrFirmwareSec, StrBuildDate, StrUefi,
+  StrSystem, StrBoard, StrSoc, StrCpu, StrCpuTemp, StrCpuSec, StrCpuSpeed, StrCpuMax, StrMemory, StrFirmware, StrFirmwareSec, StrBuildDate, StrUefi,
   StrDisplay, StrStorage, StrNoStorage, StrConsole,
   StrDisplaySec, StrHdmiRes, StrAuto, StrHdmiNote, StrGeneral, StrLanguage, StrTimeout, StrSeconds,
   StrNow, StrDate, StrTime, StrYear, StrMonth, StrDay, StrHour, StrMinute, StrApplyTime, StrTimeSet,

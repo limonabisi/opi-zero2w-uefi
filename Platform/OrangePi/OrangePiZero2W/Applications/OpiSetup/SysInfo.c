@@ -145,8 +145,9 @@ SysInfoCollect (
       UnicodeSPrint (
         Info->Cpu,
         sizeof (Info->Cpu),
-        L"%u x Cortex-A53  ·  %u MHz",
+        L"%u x Cortex-A53  ·  %u MHz (max %u)",
         T4->CoreCount,
+        T4->CurrentSpeed,
         T4->MaxSpeed
         );
     }

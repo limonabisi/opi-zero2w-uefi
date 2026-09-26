@@ -1,0 +1,35 @@
+## @file
+#  H616/H618 CPU clock / core voltage (AXP313A) and thermal sensor.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = SunxiCpuThermalDxe
+  FILE_GUID                      = 3f8a2d61-7c4e-4b19-a5d2-0e6b9c1f8a43
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 0.1
+  ENTRY_POINT                    = SunxiCpuThermalDxeInitialize
+
+[Sources]
+  SunxiCpuThermalDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  Silicon/Allwinner/H616Pkg/H616Pkg.dec
+
+[LibraryClasses]
+  BaseMemoryLib
+  DebugLib
+  IoLib
+  TimerLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+  UefiRuntimeServicesTableLib
+
+[Protocols]
+  gSunxiCpuThermalProtocolGuid    ## PRODUCES
+
+[Depex]
+  gEfiVariableArchProtocolGuid

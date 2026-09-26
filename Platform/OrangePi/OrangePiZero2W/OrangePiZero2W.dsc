@@ -210,7 +210,7 @@
 
 [PcdsFixedAtBuild.common]
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"Orange Pi Zero 2W EDK2 port"
-  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.7.0-h618"
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.8.0-h618"
 
   gEfiMdePkgTokenSpaceGuid.PcdMaximumUnicodeStringLength|1000000
   gEfiMdePkgTokenSpaceGuid.PcdMaximumAsciiStringLength|1000000
@@ -436,6 +436,14 @@
 !endif
   Platform/OrangePi/OrangePiZero2W/Drivers/FdtDxe/FdtDxe.inf
   MdeModulePkg/Universal/SmbiosDxe/SmbiosDxe.inf
+!ifdef QEMU_TEST
+  Silicon/Allwinner/H616Pkg/Drivers/SunxiCpuThermalDxe/SunxiCpuThermalDxe.inf {
+    <BuildOptions>
+      *_*_*_CC_FLAGS = -DSUNXI_NO_HW
+  }
+!else
+  Silicon/Allwinner/H616Pkg/Drivers/SunxiCpuThermalDxe/SunxiCpuThermalDxe.inf
+!endif
   Platform/OrangePi/OrangePiZero2W/Drivers/PlatformSmbiosDxe/PlatformSmbiosDxe.inf
 
   #

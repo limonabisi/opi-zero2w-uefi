@@ -18,6 +18,7 @@
 #include <Library/UefiBootManagerLib.h>
 #include <Protocol/LoadedImage.h>
 #include <Protocol/SimpleTextInEx.h>
+#include <Protocol/SunxiCpuThermal.h>
 
 //
 // Variables
@@ -103,6 +104,10 @@ STATIC UINTN       mHdmiMode, mHdmiModeOrig;
 STATIC INT32       mTimeout, mTimeoutOrig;
 STATIC UINTN       mLang, mLangOrig;
 STATIC UINTN       mSecureBoot, mSecureBootOrig;
+STATIC UINTN       mCpuSpeed, mCpuSpeedOrig;
+STATIC SUNXI_CPU_THERMAL_PROTOCOL  *mCpu;
+STATIC CHAR16      mCpuMaxLabel[40];
+STATIC CHAR16      mTempStr[40];
 STATIC BOOT_ENTRY  mBoot[MAX_BOOT];
 STATIC UINTN       mBootCount;
 STATIC UINT16      mBootOrderOrig[MAX_BOOT];
@@ -211,6 +216,30 @@ AddAction (
 }
 
 STATIC
+CONST CHAR16 *
+CpuTempString (
+  VOID
+  )
+{
+  INT32  T;
+
+  if ((mCpu == NULL) || EFI_ERROR (mCpu->GetTemperature (mCpu, SUNXI_THS_SENSOR_CPU, &T))) {
+    return L"-";
+  }
+
+  UnicodeSPrint (
+    mTempStr,
+    sizeof (mTempStr),
+    L"%d.%d °C  ·  %u MHz  ·  %u mV",
+    T / 1000,
+    (T >= 0 ? T : -T) % 1000 / 100,
+    mCpu->CurrentMhz,
+    mCpu->VddCpuMv
+    );
+  return mTempStr;
+}
+
+STATIC
 UINTN
 CurrentEl (
   VOID
@@ -239,6 +268,7 @@ BuildPage (
       AddInfo (S (StrBoard), mInfo.Board);
       AddInfo (S (StrSoc), mInfo.Soc);
       AddInfo (S (StrCpu), mInfo.Cpu);
+      AddInfo (S (StrCpuTemp), CpuTempString ());
       AddInfo (S (StrMemory), mInfo.Memory);
       AddInfo (S (StrDisplay), mInfo.Display);
       AddInfo (S (StrConsole), L"UART0  ·  115200 8N1");
@@ -273,6 +303,15 @@ BuildPage (
       It->Options[1] = S (StrEnglish);
       It->OptCount   = 2;
       AddNumber (S (StrTimeout), &mTimeout, 0, 30, S (StrSeconds));
+      Add (ItSection, S (StrCpuSec));
+      UnicodeSPrint (mCpuMaxLabel, sizeof (mCpuMaxLabel), L"%s  ·  %u MHz", S (StrCpuMax), (mCpu != NULL) ? mCpu->MaxMhz : 1512);
+      It             = Add (ItChoice, S (StrCpuSpeed));
+      It->Desc       = S (StrHdmiNote);
+      It->Choice     = &mCpuSpeed;
+      It->Options[0] = mCpuMaxLabel;
+      It->Options[1] = L"1008 MHz";
+      It->Options[2] = L"1200 MHz";
+      It->OptCount   = 3;
       break;
 
     case PAGE_DATETIME:
@@ -434,6 +473,16 @@ LoadSettings (
   mTimeOrig[4] = mMinute;
 
   mSecureBoot     = SbPkEnrolled () ? 1 : 0;
+
+  if (EFI_ERROR (gBS->LocateProtocol (&gSunxiCpuThermalProtocolGuid, NULL, (VOID **)&mCpu))) {
+    mCpu = NULL;
+  }
+
+  Size = 1;
+  B    = 0;
+  gRT->GetVariable (L"CpuSpeed", &mSetupVarGuid, NULL, &Size, &B);
+  mCpuSpeed     = (B <= 2) ? B : 0;
+  mCpuSpeedOrig = mCpuSpeed;
   mSecureBootOrig = mSecureBoot;
 
   //
@@ -538,7 +587,7 @@ Dirty (
 {
   return (mHdmiMode != mHdmiModeOrig) || (mTimeout != mTimeoutOrig) ||
          (mLang != mLangOrig) || (mSecureBoot != mSecureBootOrig) ||
-         BootOrderChanged () || TimeChanged ();
+         (mCpuSpeed != mCpuSpeedOrig) || BootOrderChanged () || TimeChanged ();
 }
 
 STATIC
@@ -564,6 +613,10 @@ SaveSettings (
          sizeof (T),
          &T
          );
+
+  B = (UINT8)mCpuSpeed;
+  gRT->SetVariable (L"CpuSpeed", &mSetupVarGuid, EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS, 1, &B);
+  mCpuSpeedOrig = mCpuSpeed;
 
   B = (UINT8)mLang;
   gRT->SetVariable (L"Language", &mSetupVarGuid, EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS, 1, &B);
@@ -1249,7 +1302,8 @@ DoAction (
   EFI_TIME  Now;
   BOOLEAN   HdmiChanged;
 
-  HdmiChanged = (BOOLEAN)((mHdmiMode != mHdmiModeOrig) || (mSecureBoot != mSecureBootOrig));
+  HdmiChanged = (BOOLEAN)((mHdmiMode != mHdmiModeOrig) || (mSecureBoot != mSecureBootOrig) ||
+                          (mCpuSpeed != mCpuSpeedOrig));
 
   switch (Action) {
     case ActSaveExit:
@@ -1672,6 +1726,10 @@ OpiSetupMain (
 
     Key = WaitKey (&Tick);
     if (Tick) {
+      if (mPage == PAGE_MAIN) {
+        BuildPage ();               // live temperature
+      }
+
       continue;
     }
 
