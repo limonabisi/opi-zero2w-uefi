@@ -50,7 +50,6 @@
   gEfiSmbiosProtocolGuid
   gSunxiCpuThermalProtocolGuid
   gEfiSimpleFileSystemProtocolGuid
-  gEdkiiPeCoffImageEmulatorProtocolGuid
 
 [Guids]
   gEfiGlobalVariableGuid

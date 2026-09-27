@@ -28,27 +28,7 @@ Feature status: **[docs/STATUS.md](docs/STATUS.md)**
 - ACPI tables (FADT, MADT, GTDT, DSDT, DBG2, SPCR) and SMBIOS
 - The OS is started at EL2, so hardware virtualization is available to it
 - UEFI Shell
-- **x64 Bridge**: an optional x86-64 UEFI emulator in the firmware, so x86-64 UEFI apps and boot loaders run on the ARM64 board
 - **x64 Engine** (preview): a whole x86-64 PC emulated by the firmware, boots x86-64 Linux ISOs
-
-## x64 Bridge
-
-The firmware carries an x86-64 UEFI emulator ([MultiArchUefiPkg](https://github.com/intel/MultiArchUefiPkg)
-with [unicorn-for-efi](https://github.com/intel/unicorn-for-efi)). It is off by default.
-
-1. **F2** → Config → Compatibility → **x64 Bridge** → Enabled → **F10** (the board restarts).
-2. Insert a USB drive with `\EFI\BOOT\BOOTX64.EFI` and press **ESC**: the drive is listed as
-   *USB · x86-64 boot loader*.
-
-<p>
-  <img src="docs/images/x64-boot-menu.png" width="49%" alt="Boot menu with an x86-64 boot loader">
-  <img src="docs/images/x64-grub.png" width="49%" alt="x86-64 GRUB running on the board">
-</p>
-
-x86-64 UEFI applications, the x86-64 UEFI Shell and boot loaders such as GRUB run in the emulator
-and use the board's native drivers (display, keyboard, USB, microSD). An x86-64 **operating system**
-cannot run: once the boot loader hands over to the kernel, UEFI boot services are gone and there is
-no CPU emulation left. Emulated code is also much slower than native code.
 
 ## x64 Engine (preview)
 
@@ -79,7 +59,7 @@ at 8 KiB (`dd if=opi-zero2w-edk2-boot.bin of=/dev/sdX bs=1k seek=8`).
 | Key during boot | Action |
 |---|---|
 | F2 | Setup |
-| ESC | Boot menu (choose a device, UEFI Shell) |
+| ESC | Boot menu (choose a device, x64 PC, UEFI Shell); also in setup under Restart > Boot Manager |
 | Enter | Continue booting |
 
 Serial console: UART0 on the 40-pin header (pin 6 GND, pin 8 TX), 115200 8N1.
@@ -117,7 +97,7 @@ setup screenshots were taken.
 | `Platform/OrangePi/OrangePiZero2W` | Board: DSC/FDF, ACPI tables, setup application (`Applications/OpiSetup`), variable store, SMBIOS, logo, Secure Boot keys |
 | `Silicon/Allwinner/H616Pkg` | SoC drivers: MMC, USB (EHCI bring-up, OHCI), HDMI (DE33 + TCON + DW-HDMI), RTC, CPU clock and thermal sensor |
 | `patches/` | Small patches for EDK2 (USB root port reset, boot hot keys) and TF-A (BL33 hand-off without a DTB) |
-| `Platform/OrangePi/OrangePiZero2W/Binaries/EmulatorDxe` | Prebuilt x86-64 emulator driver (`scripts/build-emulator.sh`, patches in `patches/`) |
+| `X64Engine/` | x64 Engine source; `Platform/OrangePi/OrangePiZero2W/Binaries/X64Engine` has the prebuilt `X64Engine.efi` (`scripts/build-x64engine.sh`) |
 | `scripts/` | Build and SD image scripts |
 
 ## Known limitations

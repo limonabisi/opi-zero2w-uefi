@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build the x64 UEFI emulator driver (intel/MultiArchUefiPkg + unicorn-for-efi)
-# as a standalone EmulatorDxe.efi, bundled into the FD as a binary module.
+# Build the x64 Engine (X64Engine.efi, an x86-64 PC run by the firmware) with
+# unicorn-for-efi, using intel/MultiArchUefiPkg's build setup.
 set -euo pipefail
 TOP="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${SRC:-$TOP/src}"
@@ -23,12 +23,6 @@ mkdir -p "$WORKSPACE"
 set +u
 source "$SRC/edk2/edksetup.sh" BaseTools >/dev/null
 set -u
-build -a AARCH64 -t GCC -b "$TARGET" -n "$(nproc)" -p MultiArchUefiPkg/Emulator.dsc -D MAU_EMU_X64_RAZ_WI_PIO=YES
-OUT="$WORKSPACE/Build/MultiArchUefiPkg/${TARGET}_GCC/AARCH64/EmulatorDxe.efi"
-mkdir -p "$TOP/Platform/OrangePi/OrangePiZero2W/Binaries/EmulatorDxe"
-cp "$OUT" "$TOP/Platform/OrangePi/OrangePiZero2W/Binaries/EmulatorDxe/EmulatorDxe.efi"
-ls -la "$TOP/Platform/OrangePi/OrangePiZero2W/Binaries/EmulatorDxe/EmulatorDxe.efi"
-
 # x64 Engine (x86-64 PC), an application on the SD card's FAT partition
 cp "$TOP/X64Engine/X64Engine.dsc" "$SRC/MultiArchUefiPkg/X64Engine.dsc"
 build -a AARCH64 -t GCC -b "$TARGET" -n "$(nproc)" -p MultiArchUefiPkg/X64Engine.dsc

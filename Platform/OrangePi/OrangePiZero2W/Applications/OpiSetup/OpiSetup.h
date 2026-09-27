@@ -100,7 +100,7 @@ typedef enum {
   StrSecureBoot, StrSbDesc, StrSbOff, StrSbOn, StrSbState, StrSbActive, StrSbInactive, StrSbFailed, StrNotSupported, StrTpm, StrNone, StrAcpi, StrAcpiOn, StrVirtSec, StrVirt, StrVirtOn, StrVirtOff, StrVGic, StrPassword, StrNotSet,
   StrBootOrder, StrBootOrderHint, StrBootNow, StrBootFailed, StrOneTime,
   StrSaveExit, StrSaveRestart, StrDiscardExit, StrRestart, StrShutdown, StrShell, StrClassic,
-  StrSaveExitDesc, StrSaveRestartDesc, StrDiscardExitDesc, StrRestartDesc, StrShutdownDesc, StrShellDesc, StrClassicDesc,
+  StrSaveExitDesc, StrSaveRestartDesc, StrDiscardExitDesc, StrRestartDesc, StrShutdownDesc, StrShellDesc, StrClassicDesc, StrBootManager, StrBootManagerDesc,
   StrKeyMove, StrKeyChange, StrKeyBack, StrKeySave,
   StrYes, StrNo, StrOk, StrQuitNoSave, StrQuitNoSaveMsg, StrSaveQ, StrSaveMsg, StrRestartNeeded,
   StrBootQ, StrBootMsg, StrBootMenu, StrBootMenuSub, StrEnterSetup, StrContinueBoot, StrSaved, StrTurkish, StrEnglish,

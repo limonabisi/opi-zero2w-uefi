@@ -64,6 +64,7 @@ typedef enum {
   ActShell,
   ActClassic,
   ActSetTime,
+  ActBootManager,
   ActBoot            // + boot entry index
 } ACTION;
 
@@ -109,7 +110,6 @@ STATIC INT32       mTimeout, mTimeoutOrig;
 STATIC UINTN       mLang, mLangOrig;
 STATIC UINTN       mSecureBoot, mSecureBootOrig;
 STATIC UINTN       mCpuSpeed, mCpuSpeedOrig;
-STATIC UINTN       mX64Bridge, mX64BridgeOrig;
 STATIC SUNXI_CPU_THERMAL_PROTOCOL  *mCpu;
 STATIC CHAR16      mCpuMaxLabel[40];
 STATIC CHAR16      mTempStr[40];
@@ -304,13 +304,6 @@ BuildPage (
       It->Options[1] = L"1008 MHz";
       It->Options[2] = L"1200 MHz";
       It->OptCount   = 3;
-      Add (ItSection, S (StrCompatSec));
-      It             = Add (ItChoice, S (StrX64Bridge));
-      It->Desc       = S (StrX64Desc);
-      It->Choice     = &mX64Bridge;
-      It->Options[0] = S (StrSbOff);
-      It->Options[1] = S (StrSbOn);
-      It->OptCount   = 2;
       break;
 
     case PAGE_DATETIME:
@@ -365,6 +358,7 @@ BuildPage (
       AddAction (S (StrRestart), S (StrRestartDesc), ActRestart, FALSE);
       AddAction (S (StrShutdown), S (StrShutdownDesc), ActShutdown, TRUE);
       Add (ItSection, L"");
+      AddAction (S (StrBootManager), S (StrBootManagerDesc), ActBootManager, FALSE);
       AddAction (S (StrShell), S (StrShellDesc), ActShell, FALSE);
       AddAction (S (StrClassic), S (StrClassicDesc), ActClassic, FALSE);
       break;
@@ -482,9 +476,6 @@ LoadSettings (
 
   Size = 1;
   B    = 0;
-  gRT->GetVariable (L"X64Bridge", &mSetupVarGuid, NULL, &Size, &B);
-  mX64Bridge     = (B != 0) ? 1 : 0;
-  mX64BridgeOrig = mX64Bridge;
   mSecureBootOrig = mSecureBoot;
 
   //
@@ -555,7 +546,7 @@ Dirty (
 {
   return (mHdmiMode != mHdmiModeOrig) || (mTimeout != mTimeoutOrig) ||
          (mLang != mLangOrig) || (mSecureBoot != mSecureBootOrig) ||
-         (mCpuSpeed != mCpuSpeedOrig) || (mX64Bridge != mX64BridgeOrig) || BootOrderChanged () || TimeChanged ();
+         (mCpuSpeed != mCpuSpeedOrig) || BootOrderChanged () || TimeChanged ();
 }
 
 STATIC
@@ -584,9 +575,7 @@ SaveSettings (
   gRT->SetVariable (L"CpuSpeed", &mSetupVarGuid, EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS, 1, &B);
   mCpuSpeedOrig = mCpuSpeed;
 
-  B = (UINT8)mX64Bridge;
-  gRT->SetVariable (L"X64Bridge", &mSetupVarGuid, EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS, 1, &B);
-  mX64BridgeOrig = mX64Bridge;
+  gRT->SetVariable (L"X64Bridge", &mSetupVarGuid, 0, 0, NULL);     // setting of the removed x64 Bridge
 
 
   if (BootOrderChanged ()) {
@@ -1263,6 +1252,12 @@ BootOption (
 //
 STATIC
 BOOLEAN
+RunBootMenu (
+  VOID
+  );
+
+STATIC
+BOOLEAN
 DoAction (
   UINTN  Action
   )
@@ -1271,7 +1266,7 @@ DoAction (
   BOOLEAN   HdmiChanged;
 
   HdmiChanged = (BOOLEAN)((mHdmiMode != mHdmiModeOrig) || (mSecureBoot != mSecureBootOrig) ||
-                          (mCpuSpeed != mCpuSpeedOrig) || (mX64Bridge != mX64BridgeOrig));
+                          (mCpuSpeed != mCpuSpeedOrig));
 
   switch (Action) {
     case ActSaveExit:
@@ -1311,6 +1306,10 @@ DoAction (
 
     case ActShell:
       StartFvApp (&mShellGuid);
+      return FALSE;
+
+    case ActBootManager:
+      RunBootMenu ();                     // returns when "Enter Setup" is chosen
       return FALSE;
 
     case ActClassic:
@@ -1453,85 +1452,6 @@ STATIC UINTN    mBmSel;
 #define BM_ROW_H  52
 
 //
-// x64 Bridge: x86-64 boot loaders (\EFI\BOOT\BOOTX64.EFI) on removable or
-// fixed media, offered in the boot menu while the x86-64 emulator is running.
-//
-#define MAX_X64  8
-
-STATIC EFI_HANDLE  mX64Fs[MAX_X64];
-STATIC CHAR16      mX64Desc[MAX_X64][64];
-STATIC UINTN       mX64Count;
-
-STATIC
-BOOLEAN
-X64BridgeActive (
-  VOID
-  )
-{
-  VOID  *Emu;
-
-  return !EFI_ERROR (gBS->LocateProtocol (&gEdkiiPeCoffImageEmulatorProtocolGuid, NULL, &Emu));
-}
-
-STATIC
-VOID
-ScanX64Loaders (
-  VOID
-  )
-{
-  EFI_HANDLE                       *Handles;
-  UINTN                            Count;
-  UINTN                            Index;
-  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *Fs;
-  EFI_FILE_PROTOCOL                *Root;
-  EFI_FILE_PROTOCOL                *File;
-  EFI_BLOCK_IO_PROTOCOL            *BlockIo;
-  EFI_DEVICE_PATH_PROTOCOL         *Dp;
-  EFI_DEVICE_PATH_PROTOCOL         *Node;
-  CONST CHAR16                     *Kind;
-
-  mX64Count = 0;
-  if (!X64BridgeActive () ||
-      EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &Count, &Handles)))
-  {
-    return;
-  }
-
-  for (Index = 0; Index < Count && mX64Count < MAX_X64; Index++) {
-    if (EFI_ERROR (gBS->HandleProtocol (Handles[Index], &gEfiSimpleFileSystemProtocolGuid, (VOID **)&Fs)) ||
-        EFI_ERROR (Fs->OpenVolume (Fs, &Root)))
-    {
-      continue;
-    }
-
-    if (!EFI_ERROR (Root->Open (Root, &File, L"\\EFI\\BOOT\\BOOTX64.EFI", EFI_FILE_MODE_READ, 0))) {
-      File->Close (File);
-      Kind = L"microSD";
-      Dp   = DevicePathFromHandle (Handles[Index]);
-      for (Node = Dp; Node != NULL && !IsDevicePathEnd (Node); Node = NextDevicePathNode (Node)) {
-        if ((DevicePathType (Node) == MESSAGING_DEVICE_PATH) && (DevicePathSubType (Node) == MSG_USB_DP)) {
-          Kind = L"USB";
-        }
-      }
-
-      if (!EFI_ERROR (gBS->HandleProtocol (Handles[Index], &gEfiBlockIoProtocolGuid, (VOID **)&BlockIo)) &&
-          (BlockIo->Media->BlockSize == 2048))
-      {
-        Kind = L"USB CD/ISO";
-      }
-
-      mX64Fs[mX64Count] = Handles[Index];
-      UnicodeSPrint (mX64Desc[mX64Count], sizeof (mX64Desc[0]), L"%s  ·  x86-64 boot loader", Kind);
-      mX64Count++;
-    }
-
-    Root->Close (Root);
-  }
-
-  FreePool (Handles);
-}
-
-//
 // x64 Engine: the x86-64 PC (\EFI\X64ENGINE\X64ENGINE.EFI on the microSD card
 // or a USB drive), listed as the last boot device.
 //
@@ -1608,7 +1528,7 @@ BmDevCount (
   VOID
   )
 {
-  return mBootCount + mX64Count + (mEngineFs != NULL ? 1 : 0);
+  return mBootCount + (mEngineFs != NULL ? 1 : 0);
 }
 
 STATIC
@@ -1621,39 +1541,7 @@ BmDevLabel (
     return mBoot[I].Desc;
   }
 
-  if (I < mBootCount + mX64Count) {
-    return mX64Desc[I - mBootCount];
-  }
-
   return L"x64 PC  \x00B7  run an x86-64 ISO";
-}
-
-STATIC
-VOID
-BootX64 (
-  UINTN  I
-  )
-{
-  EFI_DEVICE_PATH_PROTOCOL  *Dp;
-  EFI_HANDLE                Image;
-  EFI_STATUS                Status;
-
-  Dp = FileDevicePath (mX64Fs[I], L"\\EFI\\BOOT\\BOOTX64.EFI");
-  if (Dp == NULL) {
-    return;
-  }
-
-  gST->ConOut->ClearScreen (gST->ConOut);
-  Status = gBS->LoadImage (TRUE, mImageHandle, Dp, NULL, 0, &Image);
-  if (!EFI_ERROR (Status)) {
-    Status = gBS->StartImage (Image, NULL, NULL);
-  }
-
-  FreePool (Dp);
-  if (EFI_ERROR (Status)) {
-    Render ();
-    Dialog (S (StrOneTime), S (StrBootFailed), S (StrOk), NULL);
-  }
 }
 
 STATIC
@@ -1768,7 +1656,7 @@ DrawBootMenu (
   Kx = X + 8;
   DrawKeycap (&Kx, gCanvas.H - 44, NULL, TRUE, S (StrKeyMove));
   DrawKeycap (&Kx, gCanvas.H - 44, L"Enter", FALSE, S (StrBootNow));
-  DrawKeycap (&Kx, gCanvas.H - 44, L"Esc", FALSE, S (StrContinueBoot));
+  DrawKeycap (&Kx, gCanvas.H - 44, L"F2", FALSE, S (StrEnterSetup));
 }
 
 STATIC
@@ -1805,9 +1693,8 @@ RunBootMenu (
   DrawBootMenuHook = DrawBootMenu;
   mBmSel          = 0;
   gST->ConIn->Reset (gST->ConIn, FALSE);   // drop the ESC presses that opened the menu
-  ScanX64Loaders ();
   ScanX64Engine ();
-  DEBUG ((DEBUG_ERROR, "OpiSetup: boot menu (%u x64 loaders, x64 Engine %a)\n", mX64Count, mEngineFs != NULL ? "yes" : "no"));
+  DEBUG ((DEBUG_ERROR, "OpiSetup: boot menu (x64 Engine %a)\n", mEngineFs != NULL ? "yes" : "no"));
   for ( ; ; ) {
     Render ();
     Present ();
@@ -1824,17 +1711,12 @@ RunBootMenu (
       mBmSel--;
     } else if ((Key.ScanCode == SCAN_DOWN) && (mBmSel + 1 < BootMenuCount ())) {
       mBmSel++;
-    } else if (Key.ScanCode == SCAN_ESC) {
-      mBootMenu = mBootMenuActive = FALSE;
-      return FALSE;
     } else if ((Key.ScanCode == SCAN_F2) || ((Key.UnicodeChar == CHAR_CARRIAGE_RETURN) && (mBmSel == BmDevCount ()))) {
       mBootMenu = mBootMenuActive = FALSE;
       return TRUE;
     } else if (Key.UnicodeChar == CHAR_CARRIAGE_RETURN) {
       if (mBmSel < mBootCount) {
         BootOption (mBoot[mBmSel].Number);
-      } else if (mBmSel < mBootCount + mX64Count) {
-        BootX64 (mBmSel - mBootCount);
       } else if (mBmSel < BmDevCount ()) {
         StartX64Engine ();
       } else {
