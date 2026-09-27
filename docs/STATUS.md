@@ -20,7 +20,7 @@ Legend: ✅ Working · ⚠️ Partially working · ❌ Not working · ❓ Not te
 | Display (HDMI) | 1920x1080 | ✅ |
 | HDMI EDID | DDC does not respond, fixed 1920x1080 | ⚠️ |
 | microSD | Read / write | ✅ |
-| USB Host Mode | USB1 port, EHCI + OHCI, with and without hub | ✅ |
+| USB Host Mode | USB1 port, EHCI + OHCI, with and without hub; plug devices in before power-on (hot-plugging in the boot menu can hang) | ⚠️ |
 | USB Device Mode | USB0 (OTG on the power port), no driver | ❌ |
 | Mass Storage | USB drives, boot from USB | ✅ |
 | USB Keyboard | | ✅ |
@@ -28,7 +28,7 @@ Legend: ✅ Working · ⚠️ Partially working · ❌ Not working · ❓ Not te
 | RTC | Keeps time across reboots, no battery | ⚠️ |
 | CPU Frequency | Up to the speed-bin maximum (1416 MHz on bin 0) | ✅ |
 | Temperature Sensor | Shown in setup | ✅ |
-| Graphical Setup | F2 = setup, ESC = boot menu | ✅ |
+| Graphical Setup | F2 = setup, ESC = boot menu, Restart > Boot Manager | ✅ |
 | Persistent Variables | Stored on the microSD card | ✅ |
 | Secure Boot | Microsoft KEK/db, enabled from setup | ✅ |
 | Virtualization | OS started at EL2, GICv2 virtualization | ✅ |
@@ -40,8 +40,8 @@ Legend: ✅ Working · ⚠️ Partially working · ❌ Not working · ❓ Not te
 | Network Boot | No Ethernet on the board, no USB NIC driver | ❌ |
 | TPM | No hardware TPM | ❌ |
 | Windows Boot | Windows 10 ARM64 from a USB drive | ✅ |
-| x64 Engine | Whole x86-64 PC: boots x86-64 Linux ISOs (preview, no network, slow) | ⚠️ |
-| Linux Boot | Needs Device Tree mode | ❌ |
+| x64 Engine | Whole x86-64 PC: the Ubuntu x86-64 installer runs on the board (HDMI, USB keyboard, ISO as disk); no network, slow | ⚠️ |
+| Linux Boot | Mainline H618 device tree is handed to the OS next to ACPI | ❓ |
 
 ## OS Status
 
@@ -68,4 +68,4 @@ Legend: ✅ Working · ⚠️ Partially working · ❌ Not working · ❓ Not te
 
 | Feature | Description | State |
 |---|---|---|
-| Boot | Needs Device Tree mode (ACPI only for now) | ❌ |
+| Boot | Device tree from the firmware (mainline kernel) | ❓ |

@@ -43,8 +43,9 @@ GRUB / isolinux menu and starts the kernel from it; the ISO is the x86 system's 
 
 <p><img src="docs/images/x64engine-installer.png" width="49%" alt="Ubuntu x86-64 installer in the x64 Engine"></p>
 
-Status: Ubuntu x86-64 kernels boot to a shell and the Ubuntu `mini.iso` installer runs. Linux ISOs only
-(Windows x64 needs more than the board's 1 GB), no network card yet, roughly 10x slower than native.
+Status: the Ubuntu `mini.iso` x86-64 installer runs on the board (HDMI output, USB keyboard). The x86 machine
+gets the free memory (about 700 MB on a 1 GB board). Linux ISOs only (Windows x64 needs more than the
+board's 1 GB), no network card yet, and it is slow: expect pauses of 20-30 s between installer screens.
 Source and design notes: [X64Engine/](X64Engine/).
 
 ## Install
@@ -105,7 +106,8 @@ setup screenshots were taken.
 - HDMI EDID cannot be read on this board, the output is always 1920x1080.
 - Only the USB host port works, the OTG port on the power connector has no driver.
 - No Wi-Fi, Bluetooth or network boot.
-- Linux needs a Device Tree boot mode, which is not done yet (ACPI only for now).
+- Linux: the firmware hands the mainline H618 device tree to the OS, but booting Linux is not tested yet.
+- Plug USB devices in before power-on; hot-plugging while the boot menu is open can hang the board.
 - Windows cannot use the microSD card (the controller is not SDHCI); install it on a USB drive.
 
 ## Contributors
