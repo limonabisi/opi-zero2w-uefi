@@ -592,11 +592,11 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   /*
    * Guest RAM: what is free minus the translation cache (100 MB), the
    * kernel image being loaded and a reserve for the firmware's own drivers
-   * (USB DMA buffers etc.), at most 512 MB.
+   * (USB DMA buffers etc.).
    */
   free_mb  = free_memory_mb ();
   guest_mb = free_mb > 100 + 32 + 128 + 128 ? free_mb - 100 - 32 - 128 : 128;
-  guest_mb = guest_mb > 512 ? 512 : guest_mb & ~31ULL;
+  guest_mb = guest_mb > 1024 ? 1024 : guest_mb & ~31ULL;
   host_log ("x64e: %lu MB free, %lu MB for the x86 machine\n", free_mb, guest_mb);
   Print (L"  Memory: %lu MB free, %lu MB for the x86 machine\n", free_mb, guest_mb);
   if (machine_init (&m, guest_mb) != 0) {

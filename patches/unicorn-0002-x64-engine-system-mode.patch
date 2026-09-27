@@ -140,6 +140,21 @@ index 5f50995..4e236fb 100644
          handled = false;
          HOOK_FOREACH(uc, hook, UC_HOOK_MEM_WRITE_UNMAPPED) {
              if (hook->to_delete)
+diff --git a/qemu/accel/tcg/translate-all.c b/qemu/accel/tcg/translate-all.c
+index fef9c11..16e79ca 100644
+--- a/qemu/accel/tcg/translate-all.c
++++ b/qemu/accel/tcg/translate-all.c
+@@ -796,6 +796,10 @@ static void page_lock_pair(struct uc_struct *uc, PageDesc **ret_p1, tb_page_addr
+ #define DEFAULT_CODE_GEN_BUFFER_SIZE \
+   (DEFAULT_CODE_GEN_BUFFER_SIZE_1 < MAX_CODE_GEN_BUFFER_SIZE \
+    ? DEFAULT_CODE_GEN_BUFFER_SIZE_1 : MAX_CODE_GEN_BUFFER_SIZE)
++#ifdef X64E_TB_SIZE_MB   /* x64 engine test: small translation cache */
++#undef DEFAULT_CODE_GEN_BUFFER_SIZE
++#define DEFAULT_CODE_GEN_BUFFER_SIZE ((size_t)X64E_TB_SIZE_MB * MiB)
++#endif
+ 
+ static inline size_t size_code_gen_buffer(size_t tb_size)
+ {
 diff --git a/qemu/softmmu/vl.c b/qemu/softmmu/vl.c
 index 6860afd..94f8d72 100644
 --- a/qemu/softmmu/vl.c
@@ -368,6 +383,26 @@ index 37971d5..7777074 100644
      count = tcg_temp_new_i32(tcg_ctx);
  
      tcg_gen_ld_i32(tcg_ctx, count, tcg_ctx->cpu_env,
+diff --git a/qemu/tcg/tcg.c b/qemu/tcg/tcg.c
+index fe7063d..1624638 100644
+--- a/qemu/tcg/tcg.c
++++ b/qemu/tcg/tcg.c
+@@ -539,6 +539,15 @@ void tcg_region_init(TCGContext *tcg_ctx)
+     }
+ 
+     tcg_ctx->tree = g_tree_new(tb_tc_cmp);
++
++    /*
++     * x64 engine: the (single) region is in use from the start, through
++     * code_gen_buffer / code_gen_ptr. Without this, the first time the
++     * buffer fills up tcg_region_alloc() "allocates" region 0 again: the
++     * buffer is reused without a tb_flush, while the hash table and the
++     * page lists still point at the overwritten TBs.
++     */
++    tcg_ctx->region.current = 1;
+ }
+ 
+ /*
 diff --git a/uc.c b/uc.c
 index 4444016..10ccfe7 100644
 --- a/uc.c
