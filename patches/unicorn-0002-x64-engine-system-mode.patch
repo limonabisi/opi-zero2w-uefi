@@ -95,10 +95,10 @@ index 4012ba7..834b8ee 100644
          // Unicorn: call registered invalid instruction callbacks
          catched = false;
 diff --git a/qemu/accel/tcg/cputlb.c b/qemu/accel/tcg/cputlb.c
-index 5f50995..4e236fb 100644
+index 5f50995..f4cd742 100644
 --- a/qemu/accel/tcg/cputlb.c
 +++ b/qemu/accel/tcg/cputlb.c
-@@ -1191,11 +1191,12 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
+@@ -1191,15 +1191,25 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
  {
      ram_addr_t ram_addr = mem_vaddr + iotlbentry->addr;
  
@@ -112,8 +112,22 @@ index 5f50995..4e236fb 100644
 +    if (cpu->uc->x86_system_mode || (mr->perms & UC_PROT_EXEC) != 0) {
          struct page_collection *pages
              = page_collection_lock(cpu->uc, ram_addr, ram_addr + size);
-         tb_invalidate_phys_page_fast(cpu->uc, pages, ram_addr, size, retaddr);
-@@ -1473,10 +1474,11 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
+-        tb_invalidate_phys_page_fast(cpu->uc, pages, ram_addr, size, retaddr);
++        bool code = tb_invalidate_phys_page_fast(cpu->uc, pages, ram_addr, size, retaddr);
+         page_collection_unlock(pages);
++
++        /*
++         * x64 engine: keep trapping writes while the page still holds
++         * translated code, else a later write to another part of the page
++         * (e.g. the kernel patching its alternatives) leaves a stale TB.
++         */
++        if (cpu->uc->x86_system_mode && code) {
++            return;
++        }
+     }
+ 
+     /* For exec pages, this is cleared in tb_gen_code. */
+@@ -1473,10 +1483,11 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
      bool handled;
      HOOK_FOREACH_VAR_DECLARE;
      struct uc_struct *uc = env->uc;
@@ -127,7 +141,7 @@ index 5f50995..4e236fb 100644
          handled = false;
          // if there is already an unhandled eror, skip callbacks.
          if (uc->invalid_error == UC_ERR_OK) {
-@@ -2047,10 +2049,10 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
+@@ -2047,10 +2058,10 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
      }
  
      // Load the latest memory mapping.
@@ -141,7 +155,7 @@ index 5f50995..4e236fb 100644
          HOOK_FOREACH(uc, hook, UC_HOOK_MEM_WRITE_UNMAPPED) {
              if (hook->to_delete)
 diff --git a/qemu/accel/tcg/translate-all.c b/qemu/accel/tcg/translate-all.c
-index fef9c11..16e79ca 100644
+index fef9c11..5ade2f9 100644
 --- a/qemu/accel/tcg/translate-all.c
 +++ b/qemu/accel/tcg/translate-all.c
 @@ -796,6 +796,10 @@ static void page_lock_pair(struct uc_struct *uc, PageDesc **ret_p1, tb_page_addr
@@ -155,6 +169,47 @@ index fef9c11..16e79ca 100644
  
  static inline size_t size_code_gen_buffer(size_t tb_size)
  {
+@@ -1948,7 +1952,7 @@ void tb_invalidate_phys_range(struct uc_struct *uc, ram_addr_t start, ram_addr_t
+  *
+  * Call with all @pages in the range [@start, @start + len[ locked.
+  */
+-void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *pages,
++bool tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *pages,
+                                   tb_page_addr_t start, int len,
+                                   uintptr_t retaddr)
+ {
+@@ -1958,7 +1962,7 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
+ 
+     p = page_find(uc, start >> TARGET_PAGE_BITS);
+     if (!p) {
+-        return;
++        return false;
+     }
+ 
+     assert_page_locked(p);
+@@ -1980,6 +1984,9 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
+         tb_invalidate_phys_page_range__locked(uc, pages, p, start, start + len,
+                                               retaddr);
+     }
++
++    /* x64 engine: does the page still hold translated code? */
++    return p->first_tb != (uintptr_t)NULL;
+ }
+ 
+ /* user-mode: call with mmap_lock held */
+diff --git a/qemu/accel/tcg/translate-all.h b/qemu/accel/tcg/translate-all.h
+index 30ce55d..f2a43f3 100644
+--- a/qemu/accel/tcg/translate-all.h
++++ b/qemu/accel/tcg/translate-all.h
+@@ -26,7 +26,7 @@
+ struct page_collection *page_collection_lock(struct uc_struct *uc, tb_page_addr_t start,
+                                              tb_page_addr_t end);
+ void page_collection_unlock(struct page_collection *set);
+-void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *pages,
++bool tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *pages,
+                                   tb_page_addr_t start, int len,
+                                   uintptr_t retaddr);
+ void tb_invalidate_phys_page_range(struct uc_struct *uc, tb_page_addr_t start, tb_page_addr_t end);
 diff --git a/qemu/softmmu/vl.c b/qemu/softmmu/vl.c
 index 6860afd..94f8d72 100644
 --- a/qemu/softmmu/vl.c

@@ -443,11 +443,13 @@ machine_run (machine_t *m)
 
     now = host_now_ns ();
     if (now - last_report > 30000000000ULL) {
+      uint64_t rip = uc_x86_get_pc64 (m->uc);
+
       last_report = now;
-      host_log ("\n[x64e] %llus: %llu runs, %llu io, %llu irqs\n",
+      host_log ("\n[x64e] %llus: %llu runs, %llu io, %llu irqs, rip %llx\n",
                 (unsigned long long)(now / 1000000000ULL),
                 (unsigned long long)m->runs, (unsigned long long)m->io_exits,
-                (unsigned long long)m->irqs);
+                (unsigned long long)m->irqs, (unsigned long long)rip);
     }
   }
 }

@@ -22,8 +22,14 @@ host_now_ns (void)
 {
   struct timespec ts;
 
+  static uint64_t scale;
+
+  if (!scale) {
+    scale = getenv ("X64E_TIMESCALE") ? strtoull (getenv ("X64E_TIMESCALE"), NULL, 0) : 1;
+  }
+
   clock_gettime (CLOCK_MONOTONIC, &ts);
-  return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec - t0;
+  return ((uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec - t0) * scale;
 }
 
 void
