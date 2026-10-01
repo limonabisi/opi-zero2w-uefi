@@ -22,10 +22,16 @@
   keymap.c
   pci.c
   virtio_blk.c
+  virtio_net.c
+  ext4.c
   iso9660.c
   bootcfg.c
   linuxboot.c
   host_uefi.c
+  x64e_el.h
+
+[Sources.AARCH64]
+  x64e_el.c
 
 [Packages]
   MdePkg/MdePkg.dec
@@ -52,6 +58,10 @@
   gEfiGraphicsOutputProtocolGuid
   gEfiBlockIoProtocolGuid
   gEfiSimpleFileSystemProtocolGuid
+  gEfiSimpleNetworkProtocolGuid
+  gEfiLoadedImageProtocolGuid
+  gEfiDevicePathProtocolGuid
+  gEfiCpuArchProtocolGuid
 
 [Guids]
   gEfiFileInfoGuid

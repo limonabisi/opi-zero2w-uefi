@@ -355,7 +355,8 @@ OhciControlTransfer (
     *TransferResult = EFI_USB_ERR_SYSTEM;
     return EFI_DEVICE_ERROR;
   }
-  gBS->Stall(20 * 1000);
+  // one frame: the HC no longer walks the old control list
+  gBS->Stall (1000);
 
   OhciSetMemoryPointer (Ohc, HC_CONTROL_HEAD, NULL);
   Ed = OhciCreateED (Ohc);
@@ -527,14 +528,12 @@ OhciControlTransfer (
     Status = EFI_DEVICE_ERROR;
     goto UNMAP_DATA_BUFF;
   }
-  gBS->Stall(20 * 1000);
-
-
+  // poll in 50 us steps (TimeCount counts 50 us units)
   TimeCount = 0;
   Status = CheckIfDone (Ohc, CONTROL_LIST, Ed, HeadTd, &EdResult);
 
-  while (Status == EFI_NOT_READY && TimeCount <= TimeOut) {
-    gBS->Stall (1000);
+  while (Status == EFI_NOT_READY && TimeCount <= (UINTN)TimeOut * 20 + 20) {
+    gBS->Stall (50);
     TimeCount++;
     Status = CheckIfDone (Ohc, CONTROL_LIST, Ed, HeadTd, &EdResult);
   }
@@ -698,7 +697,8 @@ OhciBulkTransfer(
     *TransferResult = EFI_USB_ERR_SYSTEM;
     return EFI_DEVICE_ERROR;
   }
-  gBS->Stall(20 * 1000);
+  // one frame: the HC no longer walks the old bulk list
+  gBS->Stall (1000);
 
   OhciSetMemoryPointer (Ohc, HC_BULK_HEAD, NULL);
 
@@ -736,10 +736,20 @@ OhciBulkTransfer(
   HeadTd = NULL;
   FirstTD = TRUE;
   while (LeftLength > 0) {
-    ActualSendLength = LeftLength;
-    if (LeftLength > MaxPacketLength) {
-      ActualSendLength = MaxPacketLength;
+    UINTN  Packets;
+
+    ActualSendLength = 0x2000 - (UINTN)(MapPyhAddr & 0xFFF);
+    if (ActualSendLength >= LeftLength) {
+      ActualSendLength = LeftLength;
+    } else {
+      // keep packet boundaries on TD boundaries
+      ActualSendLength -= ActualSendLength % MaxPacketLength;
+      if (ActualSendLength == 0) {
+        ActualSendLength = MIN (LeftLength, MaxPacketLength);
+      }
     }
+
+    Packets = (ActualSendLength + MaxPacketLength - 1) / MaxPacketLength;
     DataTd = OhciCreateTD (Ohc);
     if (DataTd == NULL) {
       DEBUG ((DEBUG_INFO, "OhciBulkTransfer: Fail to allocate buffer for Data Stage TD\r\n"));
@@ -765,7 +775,7 @@ OhciBulkTransfer(
     } else {
       OhciLinkTD (HeadTd, DataTd);
     }
-    *DataToggle ^= 1;
+    *DataToggle ^= (UINT8)(Packets & 1);
     MapPyhAddr += ActualSendLength;
     LeftLength -= ActualSendLength;
   }
@@ -811,27 +821,90 @@ OhciBulkTransfer(
     DEBUG ((DEBUG_INFO, "OhciControlTransfer: Fail to enable BULK_ENABLE\r\n"));
     goto FREE_OHCI_TDBUFF;
   }
-  gBS->Stall(20 * 1000);
-
+  //
+  // Wait until every data TD has retired, or one retired short (a short
+  // packet ends the transfer; the TDs after it are dropped), or an error.
+  // Poll in 50 us steps (TimeCount counts 50 us units).
+  //
   TimeCount = 0;
-  Status = CheckIfDone (Ohc, BULK_LIST, Ed, HeadTd, &EdResult);
-  while (Status == EFI_NOT_READY && TimeCount <= TimeOut) {
-    gBS->Stall (1000);
+  for (;;) {
+    TD_DESCRIPTOR  *Td;
+    UINTN          Done;
+    UINT32         Cc;
+    BOOLEAN        Finished;
+
+    Done     = 0;
+    Cc       = TD_NO_ERROR;
+    Finished = TRUE;
+    MemoryFence ();
+    for (Td = HeadTd; Td != NULL && Td != EmptyTd; Td = (TD_DESCRIPTOR *)(UINTN)Td->NextTDPointer) {
+      Cc = Td->Word0.ConditionCode;
+      if ((Cc == TD_TOBE_PROCESSED) || (Cc == TD_TOBE_PROCESSED_2)) {
+        Finished = FALSE;
+        break;
+      }
+
+      if ((Cc != TD_NO_ERROR) && (Cc != TD_DATA_UNDERRUN)) {
+        break;
+      }
+
+      if (Td->CurrBufferPointer == 0) {
+        Done += Td->ActualSendLength;
+      } else {
+        // short packet: CBP points just past the last byte transferred
+        Done += Td->CurrBufferPointer - Td->DataBuffer;
+        Cc    = TD_NO_ERROR;
+        break;
+      }
+    }
+
+    if (Finished) {
+      if (Cc == TD_DATA_UNDERRUN) {
+        Cc = TD_NO_ERROR;
+      }
+
+      EdResult.ErrorCode = Cc;
+      if (Cc == TD_NO_ERROR) {
+        *DataLength = Done;
+      }
+
+      break;
+    }
+
+    if ((TimeOut != 0) && (TimeCount > (UINTN)TimeOut * 20)) {
+      EdResult.ErrorCode = TD_TOBE_PROCESSED;
+      break;
+    }
+
+    gBS->Stall (50);
     TimeCount++;
-    Status = CheckIfDone (Ohc, BULK_LIST, Ed, HeadTd, &EdResult);
   }
 
+  // stop the HC on this ED, then take the data toggle it carries
+  OhciSetEDField (Ed, ED_SKIP, 1);
+  MemoryFence ();
+
   *TransferResult = ConvertErrorCode (EdResult.ErrorCode);
+  Status          = EdResult.ErrorCode == TD_NO_ERROR ? EFI_SUCCESS :
+                    EdResult.ErrorCode == TD_TOBE_PROCESSED ? EFI_TIMEOUT : EFI_DEVICE_ERROR;
 
   if (EdResult.ErrorCode != TD_NO_ERROR) {
     if (EdResult.ErrorCode == TD_TOBE_PROCESSED) {
-      DEBUG ((DEBUG_INFO, "Bulk pipe timeout, > %d mS\r\n", TimeOut));
+      DEBUG ((DEBUG_VERBOSE, "Bulk pipe timeout, > %d mS\r\n", TimeOut));
+      // nothing went through: the first TD still holds the starting toggle
+      if ((HeadTd->Word0.ConditionCode == TD_TOBE_PROCESSED) || (HeadTd->Word0.ConditionCode == TD_TOBE_PROCESSED_2)) {
+        *DataToggle = (UINT8)(HeadTd->Word0.DataToggle & 1);
+      } else {
+        *DataToggle = (UINT8)OhciGetEDField (Ed, ED_DTTOGGLE);
+      }
     } else {
       DEBUG ((DEBUG_INFO, "Bulk pipe broken\r\n"));
-      *DataToggle = EdResult.NextToggle;
+      *DataToggle = (UINT8)OhciGetEDField (Ed, ED_DTTOGGLE);
     }
+
     *DataLength = 0;
   } else {
+    *DataToggle = (UINT8)OhciGetEDField (Ed, ED_DTTOGGLE);
     DEBUG ((DEBUG_VERBOSE, "Bulk transfer successed\r\n"));
   }
   //*DataToggle = (UINT8) OhciGetEDField (Ed, ED_DTTOGGLE);

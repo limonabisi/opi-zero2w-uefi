@@ -228,6 +228,10 @@
 !if $(ARCH) == RISCV64
   *_*_*_CC_FLAGS                       = -Os
 !endif
+  # x64 Engine: the emulator is speed-critical, build it with -O2 instead of
+  # EDK2's size-optimized -Os (the link step matters too, it does the LTO codegen)
+  GCC:*_*_AARCH64_CC_FLAGS             = -O2
+  GCC:*_*_AARCH64_DLINK_FLAGS          = -O2
 
 [Components]
   X64Engine/X64Engine.inf

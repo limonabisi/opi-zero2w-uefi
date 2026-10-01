@@ -12,6 +12,9 @@
 #include <termios.h>
 #include <sys/mman.h>
 #include <sys/time.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include "x64e.h"
 
 static uint64_t   t0;
@@ -110,13 +113,15 @@ host_idle_until (uint64_t deadline)
   }
 }
 
+static int kick_mode;                     /* 0 stop, 1 kick only, 2 nothing */
+
 static void
 on_kick (int sig)
 {
   (void)sig;
-  if (kick_uc && getenv ("X64E_KICK_ONLY")) {
+  if (kick_uc && kick_mode == 1) {
     uc_x86_kick (kick_uc);
-  } else if (kick_uc && !getenv ("X64E_KICK_NOOP")) {
+  } else if (kick_uc && kick_mode == 0) {
     uc_emu_stop (kick_uc);
   }
 }
@@ -127,7 +132,8 @@ host_start_kick_timer (uc_engine *uc, uint32_t period_us)
   struct itimerval it;
   struct sigaction sa;
 
-  kick_uc = uc;
+  kick_uc   = uc;
+  kick_mode = getenv ("X64E_KICK_ONLY") ? 1 : getenv ("X64E_KICK_NOOP") ? 2 : 0;
   memset (&sa, 0, sizeof (sa));
   sa.sa_handler = on_kick;
   sa.sa_flags   = SA_RESTART;
@@ -174,6 +180,65 @@ host_disk_write (void *disk, uint64_t off, const void *buf, uint32_t len)
   return pwrite ((int)(intptr_t)disk, buf, len, (off_t)off) == (ssize_t)len ? 0 : -1;
 }
 
+/*
+ * X64E_NET=LPORT:RPORT - raw Ethernet frames over UDP on 127.0.0.1, one
+ * frame per datagram (QEMU "-netdev socket,udp=" compatible), e.g. against
+ *   qemu-system-aarch64 -M none -netdev user,id=u -netdev socket,id=s,
+ *     udp=127.0.0.1:LPORT,localaddr=127.0.0.1:RPORT
+ *     -netdev hubport,id=h1,hubid=0,netdev=u -netdev hubport,id=h2,hubid=0,netdev=s
+ */
+static int                net_fd = -1;
+static struct sockaddr_in net_peer;
+
+static int
+net_open (const char *spec)
+{
+  struct sockaddr_in me;
+  unsigned           lport = 0, rport = 0;
+
+  if (sscanf (spec, "%u:%u", &lport, &rport) != 2) {
+    return -1;
+  }
+
+  net_fd = socket (AF_INET, SOCK_DGRAM, 0);
+  memset (&me, 0, sizeof (me));
+  me.sin_family      = AF_INET;
+  me.sin_port        = htons (lport);
+  me.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
+  if (net_fd < 0 || bind (net_fd, (struct sockaddr *)&me, sizeof (me))) {
+    perror ("x64e: net");
+    return -1;
+  }
+
+  fcntl (net_fd, F_SETFL, O_NONBLOCK);
+  net_peer          = me;
+  net_peer.sin_port = htons (rport);
+  return 0;
+}
+
+int
+host_net_send (const void *frame, uint32_t len)
+{
+  if (net_fd < 0) {
+    return -1;
+  }
+
+  return sendto (net_fd, frame, len, 0, (struct sockaddr *)&net_peer, sizeof (net_peer)) == (ssize_t)len ? 0 : -1;
+}
+
+int
+host_net_recv (void *frame, uint32_t max)
+{
+  ssize_t n;
+
+  if (net_fd < 0) {
+    return 0;
+  }
+
+  n = recv (net_fd, frame, max, 0);
+  return n > 0 ? (int)n : 0;
+}
+
 static uint8_t *
 load_file (const char *path, size_t *size)
 {
@@ -210,7 +275,7 @@ main (int argc, char **argv)
   struct termios   tio;
   int              ram_mb = getenv ("X64E_RAM") ? atoi (getenv ("X64E_RAM")) : 512;
 
-  if (argc < 2 && !getenv ("X64E_ISO")) {
+  if (argc < 2 && !getenv ("X64E_ISO") && !getenv ("X64E_HD")) {
     fprintf (stderr, "usage: %s bzImage [initrd] [cmdline]\n       X64E_ISO=file.iso [X64E_ENTRY=n] %s\n", argv[0], argv[0]);
     return 1;
   }
@@ -269,6 +334,45 @@ main (int argc, char **argv)
     }
   }
 
+  if (getenv ("X64E_NET") && net_open (getenv ("X64E_NET")) == 0) {
+    static const uint8_t mac[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
+
+    machine_add_net (&m, mac);
+    fprintf (stderr, "x64e: network on udp %s\n", getenv ("X64E_NET"));
+  }
+
+  /* X64E_HD=file: the hard disk (vda, read-write); boots its installed Linux without X64E_ISO */
+  if (getenv ("X64E_HD")) {
+    int fd = open (getenv ("X64E_HD"), O_RDWR);
+
+    if (fd < 0) {
+      perror (getenv ("X64E_HD"));
+      return 1;
+    }
+
+    machine_add_disk (&m, (void *)(intptr_t)fd, (uint64_t)lseek (fd, 0, SEEK_END), 0);
+    if (!getenv ("X64E_ISO")) {
+      static bootlist_t hbl;
+      iso_t             fs;
+      int               i;
+
+      if (!disk_find_linux ((void *)(intptr_t)fd, (uint64_t)lseek (fd, 0, SEEK_END), &fs) ||
+          bootcfg_scan (&fs, &hbl) == 0) {
+        fprintf (stderr, "x64e: no installed system on %s\n", getenv ("X64E_HD"));
+        return 1;
+      }
+
+      for (i = 0; i < hbl.count; i++) {
+        fprintf (stderr, "  [%d] %s  (%s)\n", i, hbl.e[i].title, hbl.e[i].kernel);
+      }
+
+      i = getenv ("X64E_ENTRY") ? atoi (getenv ("X64E_ENTRY")) : 0;
+      if (iso_boot (&m, &fs, &hbl.e[i < hbl.count ? i : 0], getenv ("X64E_APPEND") ? getenv ("X64E_APPEND") : "console=ttyS0")) {
+        return 1;
+      }
+    }
+  }
+
   if (getenv ("X64E_ISO")) {
     static bootlist_t bl;
     iso_t      iso;
@@ -297,7 +401,7 @@ main (int argc, char **argv)
     if (iso_boot (&m, &iso, &bl.e[sel], getenv ("X64E_APPEND") ? getenv ("X64E_APPEND") : "console=ttyS0 nolapic noapic")) {
       return 1;
     }
-  } else if (linux_boot_setup (&m, k, ks, ird, is, cmd)) {
+  } else if (!getenv ("X64E_HD") && linux_boot_setup (&m, k, ks, ird, is, cmd)) {
     return 1;
   }
 

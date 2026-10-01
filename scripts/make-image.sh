@@ -86,6 +86,9 @@ X64E="$TOP/Platform/OrangePi/OrangePiZero2W/Binaries/X64Engine/X64Engine.efi"
 if [ -f "$X64E" ]; then
   mmd -i "$PART" ::/EFI/X64ENGINE
   mcopy -i "$PART" "$X64E" ::/EFI/X64ENGINE/X64ENGINE.EFI
+  # Engine settings: shadow=0 turns the shadow MMU off, el1=0 stays at EL2
+  printf 'shadow=1\r\nel1=1\r\n' > "$WORK/X64E.CFG"
+  mcopy -i "$PART" "$WORK/X64E.CFG" ::/EFI/X64ENGINE/X64E.CFG
 fi
 dd if="$PART" of="$IMG" bs=1M seek=4 conv=notrunc status=none
 echo "SD image   : $IMG"

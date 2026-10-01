@@ -83,6 +83,7 @@ iso_open (iso_t *iso, void *disk)
 {
   uint8_t pvd[SECTOR];
 
+  memset (iso, 0, sizeof (*iso));
   iso->disk = disk;
   if (host_disk_read (disk, 16 * SECTOR, pvd, SECTOR) || pvd[0] != 1 ||
       memcmp (pvd + 1, "CD001", 5) != 0) {
@@ -144,6 +145,17 @@ iso_lookup (iso_t *iso, const char *path, uint32_t *lba, uint32_t *size)
   uint32_t cur = iso->root_lba, cur_size = iso->root_size;
   int      is_dir = 1;
 
+  if (iso->type == FS_EXT4) {
+    uint64_t sz64;
+
+    if (ext4_lookup (iso, path, lba, &sz64, &is_dir) || sz64 > 0xffffffffULL) {
+      return -1;
+    }
+
+    *size = (uint32_t)sz64;
+    return is_dir ? 1 : 0;
+  }
+
   while (*path == '/') {
     path++;
   }
@@ -183,6 +195,17 @@ iso_read_file (iso_t *iso, const char *path, size_t *size)
     return NULL;
   }
 
+  if (iso->type == FS_EXT4) {
+    if (ext4_read (iso, lba, 0, buf, sz)) {
+      host_free (buf, sz + SECTOR + 1);
+      return NULL;
+    }
+
+    buf[sz] = 0;
+    *size   = sz;
+    return buf;
+  }
+
   if (host_disk_read (iso->disk, (uint64_t)lba * SECTOR, buf, (sz + SECTOR - 1) & ~(SECTOR - 1))) {
     return NULL;
   }
@@ -205,7 +228,8 @@ iso_read_into (iso_t *iso, const char *path, uint8_t *dst, size_t max, size_t *s
   while (done < sz) {
     uint32_t chunk = sz - done > 0x100000 ? 0x100000 : sz - done;
 
-    if (host_disk_read (iso->disk, (uint64_t)lba * SECTOR + done, dst + done, chunk)) {
+    if (iso->type == FS_EXT4 ? ext4_read (iso, lba, done, dst + done, chunk)
+                             : host_disk_read (iso->disk, (uint64_t)lba * SECTOR + done, dst + done, chunk)) {
       return -1;
     }
 
@@ -214,5 +238,99 @@ iso_read_into (iso_t *iso, const char *path, uint8_t *dst, size_t max, size_t *s
   }
 
   *size = sz;
+  return 0;
+}
+
+/* ------------------------------------------------ installed systems --- */
+static int
+try_part (void *disk, uint64_t start, iso_t *fs)
+{
+  uint32_t lba, sz;
+
+  if (ext4_probe (fs, disk, start)) {
+    return 0;
+  }
+
+  return iso_lookup (fs, "/boot/grub/grub.cfg", &lba, &sz) == 0 ||
+         iso_lookup (fs, "/grub/grub.cfg", &lba, &sz) == 0;
+}
+
+static uint32_t
+le32 (const uint8_t *p)
+{
+  return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+int
+disk_find_linux (void *disk, uint64_t disk_size, iso_t *fs)
+{
+  uint8_t  mbr[512], hdr[512], ent[512];
+  int      i;
+
+  if (host_disk_read (disk, 0, mbr, 512) || mbr[510] != 0x55 || mbr[511] != 0xaa) {
+    return 0;
+  }
+
+  /* GPT (protective MBR) */
+  if (mbr[446 + 4] == 0xee && host_disk_read (disk, 512, hdr, 512) == 0 &&
+      memcmp (hdr, "EFI PART", 8) == 0) {
+    uint64_t tbl  = le32 (hdr + 72) | ((uint64_t)le32 (hdr + 76) << 32);
+    uint32_t n    = le32 (hdr + 80), esz = le32 (hdr + 84), k;
+
+    if (esz < 128 || esz > 512 || n > 256) {
+      return 0;
+    }
+
+    for (k = 0; k < n; k++) {
+      uint64_t first;
+
+      if (host_disk_read (disk, tbl * 512 + (uint64_t)k * esz, ent, esz)) {
+        return 0;
+      }
+
+      first = le32 (ent + 32) | ((uint64_t)le32 (ent + 36) << 32);
+      if (first && first * 512 < disk_size && try_part (disk, first * 512, fs)) {
+        return 1;
+      }
+    }
+
+    return 0;
+  }
+
+  /* MBR, with logical partitions in an extended one */
+  for (i = 0; i < 4; i++) {
+    const uint8_t *p     = mbr + 446 + i * 16;
+    uint8_t        type  = p[4];
+    uint64_t       start = le32 (p + 8);
+
+    if (type == 0 || start == 0) {
+      continue;
+    }
+
+    if (type == 0x05 || type == 0x0f || type == 0x85) {
+      uint64_t ebr = start, hops;
+
+      for (hops = 0; hops < 64 && ebr; hops++) {
+        uint8_t e[512];
+
+        if (host_disk_read (disk, ebr * 512, e, 512) || e[510] != 0x55) {
+          break;
+        }
+
+        if (e[446 + 4] && try_part (disk, (ebr + le32 (e + 446 + 8)) * 512, fs)) {
+          return 1;
+        }
+
+        ebr = le32 (e + 462 + 8) ? start + le32 (e + 462 + 8) : 0;
+      }
+
+      continue;
+    }
+
+    if (start * 512 < disk_size && try_part (disk, start * 512, fs)) {
+      return 1;
+    }
+  }
+
   return 0;
 }

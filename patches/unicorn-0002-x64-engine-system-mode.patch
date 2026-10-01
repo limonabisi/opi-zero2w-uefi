@@ -1,8 +1,8 @@
 diff --git a/include/uc_priv.h b/include/uc_priv.h
-index ad26c9e..d630bb1 100644
+index ad26c9e..f2fe0b3 100644
 --- a/include/uc_priv.h
 +++ b/include/uc_priv.h
-@@ -402,6 +402,14 @@ struct uc_struct {
+@@ -402,6 +402,18 @@ struct uc_struct {
      FlatView *empty_view; // Static function variable moved from flatviews_init
      uc_cb_is_native_t is_native;
      uc_cb_call_native_t call_native;
@@ -13,15 +13,19 @@ index ad26c9e..d630bb1 100644
 +    // x64 engine: whole-machine emulation. CPU exceptions and SYSCALL go to
 +    // the guest (IDT / LSTAR) like on real hardware instead of to hooks.
 +    bool x86_system_mode;
++    // x64 engine: per-PCID TLBs and jump caches (see cputlb.c)
++    void *x64e_pcid;
++    void *x64e_shadow;
++    bool x64e_nopcid;
 +    bool reset_requested;       // triple fault
  };
  
  // Metadata stub for the variable-size cpu context used with uc_context_*()
 diff --git a/include/unicorn/unicorn.h b/include/unicorn/unicorn.h
-index 4e7ed8e..0315efa 100644
+index 4e7ed8e..e5e7992 100644
 --- a/include/unicorn/unicorn.h
 +++ b/include/unicorn/unicorn.h
-@@ -1260,6 +1260,29 @@ uc_err uc_get_code_gen_buf(uc_engine *uc,
+@@ -1260,6 +1260,42 @@ uc_err uc_get_code_gen_buf(uc_engine *uc,
  UNICORN_EXPORT
  uc_err uc_get_shared(uc_engine *uc, uc_shared **shared);
  
@@ -46,6 +50,19 @@ index 4e7ed8e..0315efa 100644
 +UNICORN_EXPORT
 +int uc_x86_reset_requested(uc_engine *uc);
 +UNICORN_EXPORT
++void uc_x86_invalidate_host(uc_engine *uc, void *host, size_t len);
++/* x64 engine shadow MMU (AArch64 hosts running the firmware at EL1) */
++UNICORN_EXPORT
++int uc_x64e_shadow_init(uc_engine *uc, void *pool, size_t bytes);
++UNICORN_EXPORT
++void uc_x64e_shadow_fini(uc_engine *uc);
++UNICORN_EXPORT
++int uc_x64e_dabt(uc_engine *uc, uint64_t far, uint64_t esr, uint64_t elr);
++UNICORN_EXPORT
++void uc_x64e_slowpath(uc_engine *uc, uint64_t host_pc);
++UNICORN_EXPORT
++void uc_x64e_shadow_stats(uc_engine *uc, uint64_t out[10]);
++UNICORN_EXPORT
 +void uc_x86_kick(uc_engine *uc);
 +
  #ifdef __cplusplus
@@ -64,10 +81,18 @@ index 5191743..be5e5b3 100644
  }
  #endif
 diff --git a/qemu/accel/tcg/cpu-exec.c b/qemu/accel/tcg/cpu-exec.c
-index 4012ba7..834b8ee 100644
+index 4012ba7..a79666f 100644
 --- a/qemu/accel/tcg/cpu-exec.c
 +++ b/qemu/accel/tcg/cpu-exec.c
-@@ -349,6 +349,26 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
+@@ -57,6 +57,7 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, TranslationBlock *itb)
+ 
+     UC_TRACE_START(UC_TRACE_TB_EXEC);
+     tb_exec_lock(cpu->uc->tcg_ctx);
++    x64e_shadow_activate(cpu, itb);
+     ret = tcg_qemu_tb_exec(env, tb_ptr);
+     tb_exec_unlock(cpu->uc->tcg_ctx);
+     UC_TRACE_END(UC_TRACE_TB_EXEC, "[uc] exec tb 0x%" PRIx64 ": ", itb->pc);
+@@ -349,6 +350,26 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
  
      // printf(">> exception index = %u\n", cpu->exception_index); qq
  
@@ -95,10 +120,353 @@ index 4012ba7..834b8ee 100644
          // Unicorn: call registered invalid instruction callbacks
          catched = false;
 diff --git a/qemu/accel/tcg/cputlb.c b/qemu/accel/tcg/cputlb.c
-index 5f50995..f4cd742 100644
+index 5f50995..fd0c44c 100644
 --- a/qemu/accel/tcg/cputlb.c
 +++ b/qemu/accel/tcg/cputlb.c
-@@ -1191,15 +1191,25 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
+@@ -30,6 +30,7 @@
+ #include "qemu/atomic.h"
+ #include "qemu/atomic128.h"
+ #include "translate-all.h"
++#include "exec/tb-hash.h"
+ #include "exec/cpu-common.h"
+ #include "trace/mem.h"
+ 
+@@ -207,6 +208,7 @@ static void tlb_mmu_resize_locked(struct uc_struct *uc, CPUTLBDesc *desc, CPUTLB
+ 
+ static void tlb_mmu_flush_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast)
+ {
++
+     desc->n_used_entries = 0;
+     desc->large_page_addr = -1;
+     desc->large_page_mask = -1;
+@@ -247,12 +249,275 @@ static inline void tlb_n_used_entries_dec(CPUArchState *env, uintptr_t mmu_idx)
+     env_tlb(env)->d[mmu_idx].n_used_entries--;
+ }
+ 
++/*
++ * x64 engine: one TLB and one TB jump cache per x86 PCID.
++ *
++ * Without PCIDs every CR3 write (every context switch) flushes the TLB and
++ * the jump cache; a fork/exec heavy guest then spends about half its time
++ * refilling them (page walks, get_page_addr_code, qht lookups). With
++ * CR4.PCIDE the guest itself tracks which address spaces are stale and asks
++ * for a flush only then (CR3 without bit 63, INVLPG, CR4.PGE toggles), so
++ * the TLB of a switched-out address space can be kept and switched back in.
++ * Linux uses up to 6 dynamic ASIDs, hence 7 slots (plus PCID 0).
++ */
++#define X64E_SLOTS 7
++
++static inline bool tlb_hit_page_anyprot(struct uc_struct *uc, CPUTLBEntry *tlb_entry,
++                                        target_ulong page);
++static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data);
++static void x64e_shadow_protect(struct uc_struct *uc, ram_addr_t ram);
++static void x64e_shadow_flush_all(struct uc_struct *uc);
++static void x64e_shadow_flush_slot(struct uc_struct *uc, int slot);
++static void x64e_shadow_flush_page(struct uc_struct *uc, target_ulong addr);
++
++typedef struct X64ePcidSlot {
++    bool valid;
++    uint16_t pcid;
++    uint64_t gen;
++    uint64_t lru;
++    uint16_t dirty;
++    CPUTLBDesc d[NB_MMU_MODES];
++    CPUTLBDescFast f[NB_MMU_MODES];
++    struct TranslationBlock **jc;
++} X64ePcidSlot;
++
++typedef struct X64ePcidState {
++    X64ePcidSlot s[X64E_SLOTS];
++    int cur;
++    uint64_t gen, tick;
++    bool in_switch;
++    uint64_t switches, hits;
++} X64ePcidState;
++
++static X64ePcidState *x64e_state(CPUState *cpu)
++{
++    struct uc_struct *uc = cpu->uc;
++    CPUArchState *env = cpu->env_ptr;
++    X64ePcidState *st = uc->x64e_pcid;
++    int64_t now;
++    int i, k;
++
++    if (st) {
++        return st;
++    }
++
++    st = g_new0(X64ePcidState, 1);
++    now = get_clock_realtime();
++    st->gen = 1;
++    /* slot 0 is the live TLB as it is now */
++    st->s[0].valid = true;
++    st->s[0].pcid = 0;
++    st->s[0].gen = st->gen;
++    st->s[0].jc = cpu->tb_jmp_cache;
++    for (i = 1; i < X64E_SLOTS; i++) {
++        for (k = 0; k < NB_MMU_MODES; k++) {
++            tlb_mmu_init(&st->s[i].d[k], &st->s[i].f[k], now);
++        }
++        st->s[i].jc = g_new0(struct TranslationBlock *, TB_JMP_CACHE_SIZE);
++    }
++    (void)env;
++    uc->x64e_pcid = st;
++    return st;
++}
++
++static void x64e_flush_live(CPUState *cpu, X64ePcidState *st)
++{
++    st->in_switch = true;
++    tlb_flush_by_mmuidx_async_work(cpu, RUN_ON_CPU_HOST_INT(ALL_MMUIDX_BITS));
++    st->in_switch = false;
++    x64e_shadow_flush_slot(cpu->uc, st->cur);
++}
++
++void tlb_x64e_set_pcid(CPUState *cpu, uint16_t pcid, bool flush)
++{
++    CPUArchState *env = cpu->env_ptr;
++    X64ePcidState *st = x64e_state(cpu);
++    X64ePcidSlot *cur = &st->s[st->cur];
++    int i, j = -1;
++    bool stale = false;
++
++    if (cur->pcid == pcid) {
++        if (flush) {
++            x64e_flush_live(cpu, st);
++        }
++        return;
++    }
++
++    for (i = 0; i < X64E_SLOTS; i++) {
++        if (i != st->cur && st->s[i].valid && st->s[i].pcid == pcid) {
++            j = i;
++            break;
++        }
++    }
++
++    if (j < 0) {
++        /* least recently used slot (a never used one first) */
++        uint64_t best = UINT64_MAX;
++
++        for (i = 0; i < X64E_SLOTS; i++) {
++            uint64_t age = st->s[i].valid ? st->s[i].lru : 0;
++            if (i != st->cur && age < best) {
++                best = age;
++                j = i;
++            }
++        }
++        stale = true;
++    } else {
++        st->hits++;
++    }
++    st->switches++;
++
++    /* save the live TLB into the current slot, load the new one */
++    memcpy(cur->d, env_tlb(env)->d, sizeof(cur->d));
++    memcpy(cur->f, env_tlb(env)->f, sizeof(cur->f));
++    cur->dirty = env_tlb(env)->c.dirty;
++    cur->gen = st->gen;
++
++    memcpy(env_tlb(env)->d, st->s[j].d, sizeof(cur->d));
++    memcpy(env_tlb(env)->f, st->s[j].f, sizeof(cur->f));
++    env_tlb(env)->c.dirty = st->s[j].valid ? st->s[j].dirty : ALL_MMUIDX_BITS;
++    cpu->tb_jmp_cache = st->s[j].jc;
++    if (!st->s[j].valid || st->s[j].gen != st->gen) {
++        stale = true;
++    }
++
++    st->cur = j;
++    st->s[j].valid = true;
++    st->s[j].pcid = pcid;
++    st->s[j].lru = ++st->tick;
++
++    if (stale || flush) {
++        env_tlb(env)->c.dirty = ALL_MMUIDX_BITS;
++        x64e_flush_live(cpu, st);
++    }
++}
++
++/* INVLPG & co: the page must also go from the saved address spaces */
++static void x64e_flush_page_saved(CPUState *cpu, target_ulong addr, uint16_t idxmap)
++{
++    X64ePcidState *st = cpu->uc->x64e_pcid;
++    int i, k, v;
++
++    if (!st) {
++        return;
++    }
++
++    for (i = 0; i < X64E_SLOTS; i++) {
++        X64ePcidSlot *s = &st->s[i];
++        unsigned int h, h0;
++
++        if (i == st->cur || !s->valid || s->gen != st->gen) {
++            continue;
++        }
++
++        for (k = 0; k < NB_MMU_MODES; k++) {
++            CPUTLBEntry *e;
++
++            if (!((idxmap >> k) & 1)) {
++                continue;
++            }
++
++            if ((addr & s->d[k].large_page_mask) == s->d[k].large_page_addr) {
++                s->gen = 0;                 /* whole address space stale */
++                break;
++            }
++
++            e = &s->f[k].table[(addr >> TARGET_PAGE_BITS) &
++                               (s->f[k].mask >> CPU_TLB_ENTRY_BITS)];
++            if (tlb_hit_page_anyprot(cpu->uc, e, addr & TARGET_PAGE_MASK)) {
++                memset(e, -1, sizeof(*e));
++                s->d[k].n_used_entries--;
++            }
++
++            for (v = 0; v < CPU_VTLB_SIZE; v++) {
++                if (tlb_hit_page_anyprot(cpu->uc, &s->d[k].vtable[v], addr & TARGET_PAGE_MASK)) {
++                    memset(&s->d[k].vtable[v], -1, sizeof(CPUTLBEntry));
++                }
++            }
++        }
++
++        h0 = tb_jmp_cache_hash_page(cpu->uc, addr - TARGET_PAGE_SIZE);
++        for (h = 0; h < TB_JMP_PAGE_SIZE; h++) {
++            s->jc[h0 + h] = NULL;
++        }
++        h0 = tb_jmp_cache_hash_page(cpu->uc, addr);
++        for (h = 0; h < TB_JMP_PAGE_SIZE; h++) {
++            s->jc[h0 + h] = NULL;
++        }
++    }
++}
++
++void x64e_jc_remove(CPUState *cpu, unsigned int h, struct TranslationBlock *tb)
++{
++    X64ePcidState *st = cpu->uc->x64e_pcid;
++    int i;
++
++    if (st) {
++        for (i = 0; i < X64E_SLOTS; i++) {
++            if (st->s[i].jc && st->s[i].jc[h] == tb) {
++                st->s[i].jc[h] = NULL;
++            }
++        }
++    }
++}
++
++void x64e_jc_clear_all(CPUState *cpu)
++{
++    X64ePcidState *st = cpu->uc->x64e_pcid;
++    int i;
++
++    if (st) {
++        for (i = 0; i < X64E_SLOTS; i++) {
++            if (st->s[i].jc) {
++                memset(st->s[i].jc, 0, sizeof(struct TranslationBlock *) * TB_JMP_CACHE_SIZE);
++            }
++        }
++    }
++}
++
++/* SMC protection must reach the saved address spaces' write entries too */
++static void tlb_reset_dirty_range_locked(struct uc_struct *uc, CPUTLBEntry *tlb_entry,
++                                         uintptr_t start, uintptr_t length);
++
++static void x64e_reset_dirty_saved(CPUState *cpu, uintptr_t start, uintptr_t length)
++{
++    X64ePcidState *st = cpu->uc->x64e_pcid;
++    int i, k;
++    unsigned int n, e;
++
++    if (!st) {
++        return;
++    }
++
++    for (i = 0; i < X64E_SLOTS; i++) {
++        X64ePcidSlot *s = &st->s[i];
++
++        if (i == st->cur || !s->valid) {
++            continue;
++        }
++
++        for (k = 0; k < NB_MMU_MODES; k++) {
++            n = (s->f[k].mask >> CPU_TLB_ENTRY_BITS) + 1;
++            for (e = 0; e < n; e++) {
++                tlb_reset_dirty_range_locked(cpu->uc, &s->f[k].table[e], start, length);
++            }
++            for (e = 0; e < CPU_VTLB_SIZE; e++) {
++                tlb_reset_dirty_range_locked(cpu->uc, &s->d[k].vtable[e], start, length);
++            }
++        }
++    }
++}
++
+ void tlb_init(CPUState *cpu)
+ {
+     CPUArchState *env = cpu->env_ptr;
+     int64_t now = get_clock_realtime();
+     int i;
+ 
++    if (!cpu->tb_jmp_cache) {
++        cpu->tb_jmp_cache = cpu->tb_jmp_cache_own;
++    }
++
+     /* All tlbs are initialized flushed. */
+     env_tlb(env)->c.dirty = 0;
+ 
+@@ -289,6 +554,14 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
+     uint16_t asked = data.host_int;
+     uint16_t all_dirty, work, to_clean;
+     int64_t now = get_clock_realtime();
++    X64ePcidState *xst = cpu->uc->x64e_pcid;
++
++    if (xst && !xst->in_switch) {
++        xst->gen++;
++    }
++    if (!xst || !xst->in_switch) {
++        x64e_shadow_flush_all(cpu->uc);
++    }
+ 
+     all_dirty = env_tlb(env)->c.dirty;
+     to_clean = asked & all_dirty;
+@@ -427,6 +700,7 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
+ {
+     CPUArchState *env = cpu->env_ptr;
+     int mmu_idx;
++    x64e_shadow_flush_page(cpu->uc, addr);
+ 
+     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+         if ((idxmap >> mmu_idx) & 1) {
+@@ -435,6 +709,7 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
+     }
+ 
+     tb_flush_jmp_cache(cpu, addr);
++    x64e_flush_page_saved(cpu, addr, idxmap);
+ }
+ 
+ /**
+@@ -616,6 +891,19 @@ void tlb_protect_code(struct uc_struct *uc, ram_addr_t ram_addr)
+ {
+     cpu_physical_memory_test_and_clear_dirty(ram_addr, TARGET_PAGE_SIZE,
+                                              DIRTY_MEMORY_CODE);
++
++    /*
++     * x64 engine: the page just got its first TB. Make every TLB write
++     * entry that maps it (through any virtual alias) take the slow path
++     * again, so the next write reaches notdirty_write().
++     */
++    if (uc->x86_system_mode && uc->cpu) {
++        void *host = qemu_map_ram_ptr(uc, NULL, ram_addr & TARGET_PAGE_MASK);
++
++        tlb_reset_dirty(uc->cpu, (ram_addr_t)(uintptr_t)host, TARGET_PAGE_SIZE);
++        x64e_reset_dirty_saved(uc->cpu, (uintptr_t)host, TARGET_PAGE_SIZE);
++        x64e_shadow_protect(uc, ram_addr);
++    }
+ }
+ 
+ /* update the TLB so that writes in physical page 'phys_addr' are no longer
+@@ -1191,15 +1479,25 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
  {
      ram_addr_t ram_addr = mem_vaddr + iotlbentry->addr;
  
@@ -127,7 +495,7 @@ index 5f50995..f4cd742 100644
      }
  
      /* For exec pages, this is cleared in tb_gen_code. */
-@@ -1473,10 +1483,11 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
+@@ -1473,10 +1771,11 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
      bool handled;
      HOOK_FOREACH_VAR_DECLARE;
      struct uc_struct *uc = env->uc;
@@ -141,7 +509,7 @@ index 5f50995..f4cd742 100644
          handled = false;
          // if there is already an unhandled eror, skip callbacks.
          if (uc->invalid_error == UC_ERR_OK) {
-@@ -2047,10 +2058,10 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
+@@ -2047,10 +2346,10 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
      }
  
      // Load the latest memory mapping.
@@ -154,8 +522,670 @@ index 5f50995..f4cd742 100644
          handled = false;
          HOOK_FOREACH(uc, hook, UC_HOOK_MEM_WRITE_UNMAPPED) {
              if (hook->to_delete)
+@@ -2482,3 +2781,649 @@ uint64_t cpu_ldq_code(CPUArchState *env, abi_ptr addr)
+     TCGMemOpIdx oi = make_memop_idx(MO_TEQ, cpu_mmu_index(env, true));
+     return full_ldq_code(env, addr, oi, 0);
+ }
++
++/*
++ * ===================================================================
++ * x64 engine: shadow MMU - direct guest memory access (Captive-style)
++ * ===================================================================
++ *
++ * The firmware runs at EL1 while the x86 machine runs (see the engine's
++ * x64e_el.c), which leaves TTBR1_EL1 - the upper half of the AArch64
++ * address space - free. Guest virtual addresses are folded into it:
++ *
++ *     host VA = guest VA | 0xffff000000000000
++ *
++ * (x86-64 user addresses land in 0xffff0000_00000000.., kernel addresses
++ * are already 0xffff8000_00000000..), and the TCG backend turns every
++ * guest load/store of a long-mode TB into "orr x3, addr, #fold; ldr/str
++ * [x3]": no software TLB lookup at all. TTBR1 points to shadow page
++ * tables built on demand from the guest's page tables:
++ *
++ *  - a translation / permission fault on such an access lands in
++ *    uc_x64e_dabt(): the guest page tables are walked (setting A/D bits),
++ *    and the page is mapped (read-only unless the guest wrote it, and never
++ *    writable while translated code lives in it); the access is retried;
++ *  - if the guest itself would fault, or the page is not RAM, or it holds
++ *    code and is written, the faulting instruction is re-executed through
++ *    the ordinary softmmu path (a one-instruction TB, CF_X64E_SLOW), which
++ *    raises the #PF / does the I/O / invalidates the code precisely;
++ *  - every guest TLB invalidation the softmmu sees (CR3 without PCID
++ *    no-flush, INVLPG, CR4 changes) drops the matching shadow entries.
++ *
++ * One shadow tree per address space (PCID slot), with its own ASID. User
++ * and kernel share it: user pages are mapped EL0-accessible, and the
++ * accesses of user-mode TBs are emitted as LDTR/STTR, which the MMU checks
++ * with EL0 permissions - so the x86 U/S bit is enforced by hardware and no
++ * TTBR1 switch is needed on system calls and interrupts. (SMAP is not
++ * offered to the guest, so the kernel has a single MMU mode.)
++ */
++#if defined(TARGET_X86_64) && defined(__aarch64__)
++#define X64E_SHADOW_POSSIBLE 1
++#endif
++
++#define X64E_ROOTS        X64E_SLOTS        /* one tree per address space */
++#define X64E_FOLD         0xffff000000000000ULL
++#define X64E_RMAP_BUCKETS 65536
++#define X64E_RMAP_MAX     (256 * 1024)
++#define X64E_PA_MASK      0x0000fffffffff000ULL
++
++typedef struct X64eRmap {
++    uint32_t next;
++    uint32_t root;
++    uint32_t gen;
++    uint32_t pad;
++    uint64_t va;
++    uint64_t page;          /* ram_addr >> TARGET_PAGE_BITS */
++    uint64_t pa;            /* host physical page it maps */
++} X64eRmap;
++
++/* software bits of shadow table descriptors: the table maps (part of) a
++   guest 2 MB / 1 GB page, so an INVLPG anywhere in it drops all of it */
++#define X64E_SW_2M  (1ULL << 55)
++#define X64E_SW_1G  (1ULL << 56)
++
++typedef struct X64eShadow {
++    bool on;
++    uint8_t *pool;
++    uint32_t npages;
++    uint32_t *free;
++    uint32_t nfree;
++    uint64_t *root[X64E_ROOTS];
++    uint32_t gen[X64E_ROOTS];
++    int cur;
++    uint64_t ttbr0;
++    unsigned t0sz;
++    uint64_t attr_blk, attr_val;
++    X64eRmap *rmap;
++    uint32_t *rhead;
++    uint32_t rfree;         /* free list head, 0 = none (entry 0 unused) */
++    uint32_t rnext;
++    uint64_t fills, slows, wprot, drops;
++    uint64_t slow_fault, slow_mmio, slow_code, large_inv;
++} X64eShadow;
++
++bool x86_x64e_probe(CPUState *cs, vaddr addr, MMUAccessType access_type, int mmu_idx);
++extern target_ulong x64e_probe_page_size;
++extern bool x64e_probe_user;
++bool x64e_page_has_code(struct uc_struct *uc, ram_addr_t ram);
++
++bool x64e_shadow_enabled(struct uc_struct *uc)
++{
++    X64eShadow *sh = uc->x64e_shadow;
++
++    return sh && sh->on;
++}
++
++#ifdef X64E_SHADOW_POSSIBLE
++
++static inline void x64e_tlbi_va_asid(uint64_t va, unsigned asid)
++{
++    uint64_t arg = ((va >> 12) & 0xfffffffffffULL) | ((uint64_t)asid << 48);
++
++    __asm__ volatile ("dsb ishst; tlbi vae1, %0; dsb nsh; isb" :: "r" (arg) : "memory");
++}
++
++static inline void x64e_tlbi_va_all(uint64_t va)
++{
++    uint64_t arg = (va >> 12) & 0xfffffffffffULL;
++
++    __asm__ volatile ("dsb ishst; tlbi vaae1, %0; dsb nsh; isb" :: "r" (arg) : "memory");
++}
++
++static inline void x64e_tlbi_asid(unsigned asid)
++{
++    uint64_t arg = (uint64_t)asid << 48;
++
++    __asm__ volatile ("dsb ishst; tlbi aside1, %0; dsb nsh; isb" :: "r" (arg) : "memory");
++}
++
++static inline void x64e_set_ttbr1(uint64_t *root, unsigned asid)
++{
++    uint64_t v = ((uint64_t)(uintptr_t)root & X64E_PA_MASK) | ((uint64_t)asid << 48);
++
++    __asm__ volatile ("dsb ishst; msr ttbr1_el1, %0; isb" :: "r" (v) : "memory");
++}
++
++static uint64_t *x64e_alloc_table(X64eShadow *sh)
++{
++    uint64_t *t;
++
++    if (sh->nfree == 0) {
++        return NULL;
++    }
++    t = (uint64_t *)(sh->pool + (size_t)sh->free[--sh->nfree] * 4096);
++    memset(t, 0, 4096);
++    return t;
++}
++
++static void x64e_free_table(X64eShadow *sh, uint64_t *t, int level)
++{
++    int i;
++
++    if (level < 3) {
++        for (i = 0; i < 512; i++) {
++            if ((t[i] & 3) == 3) {
++                x64e_free_table(sh, (uint64_t *)(uintptr_t)(t[i] & X64E_PA_MASK), level + 1);
++            }
++        }
++    }
++    sh->free[sh->nfree++] = (uint32_t)(((uint8_t *)t - sh->pool) / 4096);
++}
++
++static void x64e_drop_root(X64eShadow *sh, int key)
++{
++    if (!sh->root[key]) {
++        return;
++    }
++    x64e_free_table(sh, sh->root[key], 0);
++    sh->root[key] = NULL;
++    sh->gen[key]++;
++    sh->drops++;
++    x64e_tlbi_asid(key + 1);
++    if (sh->cur == key) {
++        /* never leave TTBR1 on freed tables */
++        sh->root[key] = x64e_alloc_table(sh);
++        x64e_set_ttbr1(sh->root[key], key + 1);
++    }
++}
++
++static void x64e_rmap_reset(X64eShadow *sh)
++{
++    memset(sh->rhead, 0, sizeof(uint32_t) * X64E_RMAP_BUCKETS);
++    sh->rfree = 0;
++    sh->rnext = 1;
++}
++
++static void x64e_drop_all(X64eShadow *sh)
++{
++    int k;
++
++    for (k = 0; k < X64E_ROOTS; k++) {
++        x64e_drop_root(sh, k);
++    }
++    x64e_rmap_reset(sh);
++}
++
++static uint64_t *x64e_pte_mark(X64eShadow *sh, int key, uint64_t va, bool create, uint64_t mark1, uint64_t mark2)
++{
++    uint64_t *t = sh->root[key];
++    int level;
++
++    if (!t) {
++        return NULL;
++    }
++    for (level = 0; level < 3; level++) {
++        uint64_t *e = &t[(va >> (39 - 9 * level)) & 511];
++
++        if ((*e & 3) != 3) {
++            uint64_t *n;
++
++            if (!create || !(n = x64e_alloc_table(sh))) {
++                return NULL;
++            }
++            *e = ((uint64_t)(uintptr_t)n & X64E_PA_MASK) | 3;
++        }
++        if (level == 1) {
++            *e |= mark1;
++        } else if (level == 2) {
++            *e |= mark2;
++        }
++        t = (uint64_t *)(uintptr_t)(*e & X64E_PA_MASK);
++    }
++    return &t[(va >> 12) & 511];
++}
++
++static uint64_t *x64e_pte(X64eShadow *sh, int key, uint64_t va, bool create)
++{
++    return x64e_pte_mark(sh, key, va, create, 0, 0);
++}
++
++/* memory attribute index the firmware's identity map uses for a PA */
++static uint64_t x64e_attr(X64eShadow *sh, uint64_t pa)
++{
++    unsigned bits = 64 - sh->t0sz;
++    int level = bits > 39 ? 0 : bits > 30 ? 1 : bits > 21 ? 2 : 3;
++    uint64_t *t = (uint64_t *)(uintptr_t)(sh->ttbr0 & X64E_PA_MASK);
++
++    if ((pa >> 21) == sh->attr_blk) {
++        return sh->attr_val;
++    }
++    for (;;) {
++        unsigned shift = 39 - 9 * level;
++        uint64_t d = t[(pa >> shift) & 511];
++
++        if (level < 3 && (d & 3) == 3) {
++            t = (uint64_t *)(uintptr_t)(d & X64E_PA_MASK);
++            level++;
++            continue;
++        }
++        if ((level < 3 && (d & 3) == 1) || (level == 3 && (d & 3) == 3)) {
++            sh->attr_blk = pa >> 21;
++            sh->attr_val = (d >> 2) & 7;
++            return sh->attr_val;
++        }
++        return 0;
++    }
++}
++
++static void x64e_rmap_compact(X64eShadow *sh)
++{
++    uint32_t b, *pp, i;
++
++    for (b = 0; b < X64E_RMAP_BUCKETS; b++) {
++        pp = &sh->rhead[b];
++        while ((i = *pp) != 0) {
++            X64eRmap *e = &sh->rmap[i];
++
++            if (e->gen != sh->gen[e->root]) {
++                *pp = e->next;
++                e->next = sh->rfree;
++                sh->rfree = i;
++            } else {
++                pp = &e->next;
++            }
++        }
++    }
++}
++
++static void x64e_rmap_add(X64eShadow *sh, uint64_t page, int key, uint64_t va, uint64_t pa)
++{
++    uint32_t b = (uint32_t)(page * 2654435761u) % X64E_RMAP_BUCKETS, i;
++    X64eRmap *e;
++
++    for (i = sh->rhead[b]; i; i = sh->rmap[i].next) {
++        e = &sh->rmap[i];
++        if (e->page == page && e->root == (uint32_t)key && e->va == va && e->gen == sh->gen[key]) {
++            return;
++        }
++    }
++    if (!sh->rfree && sh->rnext >= X64E_RMAP_MAX) {
++        x64e_rmap_compact(sh);      /* free the entries of dropped trees */
++    }
++    if (sh->rfree) {
++        i = sh->rfree;
++        sh->rfree = sh->rmap[i].next;
++    } else if (sh->rnext < X64E_RMAP_MAX) {
++        i = sh->rnext++;
++    } else {
++        x64e_drop_all(sh);          /* still full: start over */
++        return;
++    }
++    e = &sh->rmap[i];
++    e->page = page;
++    e->pa = pa;
++    e->root = key;
++    e->gen = sh->gen[key];
++    e->va = va;
++    e->next = sh->rhead[b];
++    sh->rhead[b] = i;
++}
++
++/* a page got translated code: no shadow mapping may write it any more */
++static void x64e_shadow_protect(struct uc_struct *uc, ram_addr_t ram)
++{
++    X64eShadow *sh = uc->x64e_shadow;
++    uint64_t page = ram >> TARGET_PAGE_BITS;
++    uint32_t b, *pp, i;
++
++    if (!sh || !sh->on) {
++        return;
++    }
++    b = (uint32_t)(page * 2654435761u) % X64E_RMAP_BUCKETS;
++    pp = &sh->rhead[b];
++    while ((i = *pp) != 0) {
++        X64eRmap *e = &sh->rmap[i];
++
++        if (e->page != page) {
++            pp = &e->next;
++            continue;
++        }
++        if (e->gen == sh->gen[e->root]) {
++            uint64_t *pte = x64e_pte(sh, e->root, e->va, false);
++
++            if (pte && (*pte & 3) == 3 && !(*pte & (2ULL << 6)) && (*pte & X64E_PA_MASK) == e->pa) {
++                *pte |= (2ULL << 6);            /* read-only */
++                x64e_tlbi_va_asid(e->va, e->root + 1);
++                sh->wprot++;
++            }
++        }
++        *pp = e->next;                          /* unlink, free */
++        e->next = sh->rfree;
++        sh->rfree = i;
++    }
++}
++
++static int x64e_cur_slot(struct uc_struct *uc)
++{
++    X64ePcidState *st = uc->x64e_pcid;
++
++    return st ? st->cur : 0;
++}
++
++/* before running a TB: TTBR1 must hold the shadow tree of its MMU mode */
++void x64e_shadow_activate(CPUState *cpu, TranslationBlock *tb)
++{
++    X64eShadow *sh = cpu->uc->x64e_shadow;
++    int key;
++
++    if (!sh || !sh->on) {
++        return;
++    }
++    key = x64e_cur_slot(cpu->uc);
++    if (key == sh->cur) {
++        return;
++    }
++    if (!sh->root[key] && !(sh->root[key] = x64e_alloc_table(sh))) {
++        x64e_drop_all(sh);
++        sh->root[key] = x64e_alloc_table(sh);
++    }
++    sh->cur = key;
++    x64e_set_ttbr1(sh->root[key], key + 1);
++}
++
++/* guest TLB invalidations, from the softmmu flush paths */
++static void x64e_shadow_flush_all(struct uc_struct *uc)
++{
++    X64eShadow *sh = uc->x64e_shadow;
++
++    if (sh && sh->on) {
++        x64e_drop_all(sh);
++    }
++}
++
++static void x64e_shadow_flush_slot(struct uc_struct *uc, int slot)
++{
++    X64eShadow *sh = uc->x64e_shadow;
++
++    if (sh && sh->on) {
++        x64e_drop_root(sh, slot);
++    }
++}
++
++static void x64e_shadow_flush_page(struct uc_struct *uc, target_ulong addr)
++{
++    X64eShadow *sh = uc->x64e_shadow;
++    uint64_t va = (uint64_t)addr | X64E_FOLD;
++    int k;
++
++    if (!sh || !sh->on) {
++        return;
++    }
++    for (k = 0; k < X64E_ROOTS; k++) {
++        uint64_t *t = sh->root[k], *e1, *e2, *l2, *l3;
++
++        if (!t || (t[(va >> 39) & 511] & 3) != 3) {
++            continue;
++        }
++        t = (uint64_t *)(uintptr_t)(t[(va >> 39) & 511] & X64E_PA_MASK);
++        e1 = &t[(va >> 30) & 511];
++        if ((*e1 & 3) != 3) {
++            continue;
++        }
++        l2 = (uint64_t *)(uintptr_t)(*e1 & X64E_PA_MASK);
++        if (*e1 & X64E_SW_1G) {                 /* a guest 1 GB page: all of it */
++            x64e_free_table(sh, l2, 2);
++            *e1 = 0;
++            x64e_tlbi_asid(k + 1);
++            sh->large_inv++;
++            continue;
++        }
++        e2 = &l2[(va >> 21) & 511];
++        if ((*e2 & 3) != 3) {
++            continue;
++        }
++        l3 = (uint64_t *)(uintptr_t)(*e2 & X64E_PA_MASK);
++        if (*e2 & X64E_SW_2M) {                 /* a guest 2 MB page: all of it */
++            x64e_free_table(sh, l3, 3);
++            *e2 = 0;
++            x64e_tlbi_asid(k + 1);
++            sh->large_inv++;
++            continue;
++        }
++        l3[(va >> 12) & 511] = 0;
++    }
++    x64e_tlbi_va_all(va);
++}
++
++static int x64e_fill(CPUState *cpu, X64eShadow *sh, uint64_t gva, bool is_write, uint64_t host_pc)
++{
++    CPUArchState *env = cpu->env_ptr;
++    struct uc_struct *uc = cpu->uc;
++    int key = sh->cur, idx = cpu_mmu_index(env, false);
++    uint64_t va = gva | X64E_FOLD, page = gva & TARGET_PAGE_MASK;
++    uintptr_t index;
++    CPUTLBEntry *e;
++    target_ulong rd, wr, ps;
++    uint64_t host, ram, old, pte, *p, m1, m2;
++    bool can_w, code, user;
++
++    if (key < 0 || !x86_x64e_probe(cpu, gva, is_write ? MMU_DATA_STORE : MMU_DATA_LOAD, idx)) {
++        sh->slow_fault++;
++        return 1;                               /* guest fault: precise #PF */
++    }
++    ps = x64e_probe_page_size;
++    user = x64e_probe_user;
++    index = tlb_index(env, idx, gva);
++    e = tlb_entry(env, idx, gva);
++    rd = e->addr_read;
++    wr = tlb_addr_write(e);
++    if (!tlb_hit_page(uc, rd, page) || (rd & TLB_MMIO)) {
++        sh->slow_mmio++;
++        return 1;                               /* not plain RAM */
++    }
++    host = page + e->addend;
++    ram = (page + env_tlb(env)->d[idx].iotlb[index].addr) & TARGET_PAGE_MASK;
++    can_w = tlb_hit_page(uc, wr, page) && !(wr & (TLB_MMIO | TLB_DISCARD_WRITE));
++    code = x64e_page_has_code(uc, ram);
++
++    if (is_write && code) {
++        /*
++         * A write to a page that holds translated code: drop all of that
++         * code at once (it is retranslated if run again), unless the
++         * running TB itself is on the page - then be precise.
++         */
++        TranslationBlock *tb = tcg_tb_lookup(uc->tcg_ctx, host_pc);
++
++        if (tb && (tb->page_addr[0] == ram || tb->page_addr[1] == ram)) {
++            sh->slow_code++;
++            return 1;
++        }
++        tb_invalidate_phys_range(uc, ram, ram + TARGET_PAGE_SIZE);
++        code = x64e_page_has_code(uc, ram);
++        if (code) {
++            sh->slow_code++;
++            return 1;
++        }
++    }
++    if (is_write && !can_w) {
++        sh->slow_code++;
++        return 1;
++    }
++    /* user pages: accessible from EL0 (AP[1]); a kernel write to a read-only
++       user page with CR0.WP clear cannot be expressed: softmmu */
++    if (is_write && user && !(env->cr[0] & CR0_WP_MASK) && idx != MMU_USER_IDX) {
++        sh->slow_code++;
++        return 1;
++    }
++
++    pte = (host & X64E_PA_MASK) | 3 | (x64e_attr(sh, host) << 2) | (3ULL << 8) |
++          (1ULL << 10) | (1ULL << 11) | (1ULL << 53) | (1ULL << 54);
++    if (user) {
++        pte |= 1ULL << 6;                       /* EL0 access */
++    }
++    if (!(can_w && !code)) {
++        pte |= 2ULL << 6;                       /* read-only */
++    }
++
++    m1 = ps >= (1ULL << 30) ? X64E_SW_1G : 0;
++    m2 = ps >= (1ULL << 21) && ps < (1ULL << 30) ? X64E_SW_2M : 0;
++    p = x64e_pte_mark(sh, key, va, true, m1, m2);
++    if (!p) {
++        x64e_drop_all(sh);
++        p = x64e_pte_mark(sh, key, va, true, m1, m2);
++    }
++    if (!p) {
++        return 1;
++    }
++    old = *p;
++    *p = pte;
++    if ((old & 3) == 3) {
++        x64e_tlbi_va_asid(va, key + 1);
++    } else {
++        __asm__ volatile ("dsb ishst; isb" ::: "memory");
++    }
++    if (!(pte & (2ULL << 6))) {
++        x64e_rmap_add(sh, ram >> TARGET_PAGE_BITS, key, va, host & X64E_PA_MASK);
++    }
++    sh->fills++;
++    return 0;
++}
++
++UNICORN_EXPORT
++int uc_x64e_shadow_init(struct uc_struct *uc, void *pool, size_t bytes)
++{
++    X64eShadow *sh;
++    uint64_t tcr, *r;
++    uint32_t i;
++
++    if (!uc->cpu || bytes < 64 * 4096) {
++        return -1;
++    }
++    sh = g_new0(X64eShadow, 1);
++    sh->pool = (uint8_t *)(((uintptr_t)pool + 4095) & ~(uintptr_t)4095);
++    sh->npages = (uint32_t)((bytes - ((uintptr_t)sh->pool - (uintptr_t)pool)) / 4096);
++    sh->free = g_new(uint32_t, sh->npages);
++    for (i = 0; i < sh->npages; i++) {
++        sh->free[i] = sh->npages - 1 - i;
++    }
++    sh->nfree = sh->npages;
++    sh->rmap = g_new0(X64eRmap, X64E_RMAP_MAX);
++    sh->rhead = g_new0(uint32_t, X64E_RMAP_BUCKETS);
++    x64e_rmap_reset(sh);
++    sh->cur = -1;
++    sh->attr_blk = (uint64_t)-1;
++
++    __asm__ volatile ("mrs %0, ttbr0_el1" : "=r" (sh->ttbr0));
++    __asm__ volatile ("mrs %0, tcr_el1" : "=r" (tcr));
++    sh->t0sz = tcr & 63;
++
++    /* an empty tree first, then let TTBR1 walk: T1SZ 16, 4K, ASID from TTBR1 */
++    r = x64e_alloc_table(sh);
++    x64e_set_ttbr1(r, 0);
++    tcr &= ~((1ULL << 23) | (63ULL << 16) | (3ULL << 30));
++    tcr |= (16ULL << 16) | (2ULL << 30) | (1ULL << 22);
++    __asm__ volatile ("msr tcr_el1, %0; isb; tlbi vmalle1; dsb nsh; isb" :: "r" (tcr) : "memory");
++    x64e_free_table(sh, r, 3);
++
++    uc->x64e_shadow = sh;
++    sh->on = true;
++    tb_flush(uc->cpu);                          /* retranslate with direct accesses */
++    return 0;
++}
++
++UNICORN_EXPORT
++void uc_x64e_shadow_fini(struct uc_struct *uc)
++{
++    X64eShadow *sh = uc->x64e_shadow;
++    uint64_t tcr;
++
++    if (!sh) {
++        return;
++    }
++    sh->on = false;
++    __asm__ volatile ("mrs %0, tcr_el1" : "=r" (tcr));
++    tcr |= 1ULL << 23;                          /* EPD1: no TTBR1 walks */
++    __asm__ volatile ("msr tcr_el1, %0; isb; tlbi vmalle1; dsb nsh; isb" :: "r" (tcr) : "memory");
++    tb_flush(uc->cpu);
++}
++
++/* data abort at EL1: 0 handled (retry), 1 re-execute via softmmu, -1 not ours */
++UNICORN_EXPORT
++int uc_x64e_dabt(struct uc_struct *uc, uint64_t far, uint64_t esr, uint64_t elr)
++{
++    X64eShadow *sh = uc->x64e_shadow;
++    TCGContext *tcg_ctx = uc->tcg_ctx;
++    uint64_t gva;
++
++    if (!sh || !sh->on || ((esr >> 26) & 0x3f) != 0x25 || far < X64E_FOLD ||
++        elr < (uintptr_t)tcg_ctx->code_gen_buffer ||
++        elr >= (uintptr_t)tcg_ctx->code_gen_buffer + tcg_ctx->code_gen_buffer_size) {
++        return -1;
++    }
++    gva = (far & (1ULL << 47)) ? far : (far & 0x00007fffffffffffULL);
++    return x64e_fill(uc->cpu, sh, gva, (esr >> 6) & 1, elr) ? 1 : 0;
++}
++
++UNICORN_EXPORT
++void uc_x64e_slowpath(struct uc_struct *uc, uint64_t host_pc)
++{
++    X64eShadow *sh = uc->x64e_shadow;
++    CPUState *cpu = uc->cpu;
++
++    sh->slows++;
++    cpu_restore_state(cpu, host_pc + GETPC_ADJ, true);
++    cpu->cflags_next_tb = 1 | CF_X64E_SLOW;
++    cpu_loop_exit(cpu);
++}
++
++UNICORN_EXPORT
++void uc_x64e_shadow_stats(struct uc_struct *uc, uint64_t out[10])
++{
++    X64eShadow *sh = uc->x64e_shadow;
++
++    if (!sh) {
++        memset(out, 0, 10 * sizeof(uint64_t));
++        return;
++    }
++    out[6] = sh->slow_fault;
++    out[7] = sh->slow_mmio;
++    out[8] = sh->slow_code;
++    out[9] = sh->large_inv;
++    out[0] = sh->fills;
++    out[1] = sh->slows;
++    out[2] = sh->wprot;
++    out[3] = sh->drops;
++    out[4] = sh->npages - sh->nfree;
++    out[5] = sh->rnext;
++}
++
++#else /* !X64E_SHADOW_POSSIBLE */
++
++void x64e_shadow_activate(CPUState *cpu, TranslationBlock *tb) { }
++static void x64e_shadow_protect(struct uc_struct *uc, ram_addr_t ram) { }
++static void x64e_shadow_flush_all(struct uc_struct *uc) { }
++static void x64e_shadow_flush_slot(struct uc_struct *uc, int slot) { }
++static void x64e_shadow_flush_page(struct uc_struct *uc, target_ulong addr) { }
++
++UNICORN_EXPORT
++int uc_x64e_shadow_init(struct uc_struct *uc, void *pool, size_t bytes) { return -1; }
++UNICORN_EXPORT
++void uc_x64e_shadow_fini(struct uc_struct *uc) { }
++UNICORN_EXPORT
++int uc_x64e_dabt(struct uc_struct *uc, uint64_t far, uint64_t esr, uint64_t elr) { return -1; }
++UNICORN_EXPORT
++void uc_x64e_slowpath(struct uc_struct *uc, uint64_t host_pc) { abort(); }
++UNICORN_EXPORT
++void uc_x64e_shadow_stats(struct uc_struct *uc, uint64_t out[10]) { memset(out, 0, 10 * sizeof(uint64_t)); }
++
++#endif /* X64E_SHADOW_POSSIBLE */
+diff --git a/qemu/accel/tcg/tcg-runtime.c b/qemu/accel/tcg/tcg-runtime.c
+index 0846662..24ce236 100644
+--- a/qemu/accel/tcg/tcg-runtime.c
++++ b/qemu/accel/tcg/tcg-runtime.c
+@@ -157,6 +157,7 @@ void *HELPER(lookup_tb_ptr)(CPUArchState *env)
+     if (tb == NULL) {
+         return uc->tcg_ctx->code_gen_epilogue;
+     }
++    x64e_shadow_activate(cpu, tb);
+     return tb->tc.ptr;
+ }
+ 
 diff --git a/qemu/accel/tcg/translate-all.c b/qemu/accel/tcg/translate-all.c
-index fef9c11..5ade2f9 100644
+index fef9c11..33d1b94 100644
 --- a/qemu/accel/tcg/translate-all.c
 +++ b/qemu/accel/tcg/translate-all.c
 @@ -796,6 +796,10 @@ static void page_lock_pair(struct uc_struct *uc, PageDesc **ret_p1, tb_page_addr
@@ -169,7 +1199,57 @@ index fef9c11..5ade2f9 100644
  
  static inline size_t size_code_gen_buffer(size_t tb_size)
  {
-@@ -1948,7 +1952,7 @@ void tb_invalidate_phys_range(struct uc_struct *uc, ram_addr_t start, ram_addr_t
+@@ -1299,6 +1303,7 @@ static void do_tb_flush(CPUState *cpu, run_on_cpu_data tb_flush_count)
+     }
+ #else
+     cpu_tb_jmp_cache_clear(cpu);
++    x64e_jc_clear_all(cpu);
+ #endif
+ 
+     qht_reset_size(cpu->uc, &cpu->uc->tcg_ctx->tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
+@@ -1457,6 +1462,7 @@ static void do_tb_phys_invalidate(TCGContext *tcg_ctx, TranslationBlock *tb, boo
+     if (cpu->tb_jmp_cache[h] == tb) {
+         cpu->tb_jmp_cache[h] = NULL;
+     }
++    x64e_jc_remove(cpu, h, tb);         /* the other address spaces' caches */
+ 
+     /* suppress this TB from the two jump lists */
+     tb_remove_from_jmp_list(tb, 0);
+@@ -1689,6 +1695,14 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
+     tcg_func_start(tcg_ctx);
+ 
+     tcg_ctx->cpu = env_cpu(env);
++#if defined(TARGET_X86_64)
++    /* x64 engine: long-mode TBs access guest memory through the shadow MMU */
++    tcg_ctx->x64e_direct = x64e_shadow_enabled(cpu->uc) && (flags & HF_LMA_MASK) &&
++                           !(cflags & CF_X64E_SLOW);
++    tcg_ctx->x64e_user_idx = MMU_USER_IDX;
++#else
++    tcg_ctx->x64e_direct = false;
++#endif
+     UC_TRACE_START(UC_TRACE_TB_TRANS);
+     gen_intermediate_code(cpu, tb, max_insns);
+     UC_TRACE_END(UC_TRACE_TB_TRANS, "[uc] translate tb 0x%" PRIx64 ": ", tb->pc);
+@@ -1772,9 +1786,15 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
+         phys_page2 = get_page_addr_code(env, virt_page2);
+     }
+ 
+-    /* Undoes tlb_set_dirty in notdirty_write. */
+-    tlb_reset_dirty_by_vaddr(cpu, pc & TARGET_PAGE_MASK,
+-                             (pc & ~TARGET_PAGE_MASK) + tb->size);
++    /*
++     * Undoes tlb_set_dirty in notdirty_write. In x64 engine system mode
++     * tlb_protect_code() does this once per page instead (scanning the
++     * whole TLB for every new TB was a measurable cost).
++     */
++    if (!cpu->uc->x86_system_mode) {
++        tlb_reset_dirty_by_vaddr(cpu, pc & TARGET_PAGE_MASK,
++                                 (pc & ~TARGET_PAGE_MASK) + tb->size);
++    }
+ 
+     /*
+      * No explicit memory barrier is required -- tb_link_page() makes the
+@@ -1948,7 +1968,7 @@ void tb_invalidate_phys_range(struct uc_struct *uc, ram_addr_t start, ram_addr_t
   *
   * Call with all @pages in the range [@start, @start + len[ locked.
   */
@@ -178,7 +1258,7 @@ index fef9c11..5ade2f9 100644
                                    tb_page_addr_t start, int len,
                                    uintptr_t retaddr)
  {
-@@ -1958,7 +1962,7 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
+@@ -1958,7 +1978,7 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
  
      p = page_find(uc, start >> TARGET_PAGE_BITS);
      if (!p) {
@@ -187,13 +1267,21 @@ index fef9c11..5ade2f9 100644
      }
  
      assert_page_locked(p);
-@@ -1980,6 +1984,9 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
+@@ -1980,6 +2000,17 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
          tb_invalidate_phys_page_range__locked(uc, pages, p, start, start + len,
                                                retaddr);
      }
 +
 +    /* x64 engine: does the page still hold translated code? */
 +    return p->first_tb != (uintptr_t)NULL;
++}
++
++/* x64 engine: does this RAM page hold translated code? */
++bool x64e_page_has_code(struct uc_struct *uc, ram_addr_t ram)
++{
++    PageDesc *p = page_find(uc, ram >> TARGET_PAGE_BITS);
++
++    return p && p->first_tb != (uintptr_t)NULL;
  }
  
  /* user-mode: call with mmap_lock held */
@@ -210,6 +1298,76 @@ index 30ce55d..f2a43f3 100644
                                    tb_page_addr_t start, int len,
                                    uintptr_t retaddr);
  void tb_invalidate_phys_page_range(struct uc_struct *uc, tb_page_addr_t start, tb_page_addr_t end);
+diff --git a/qemu/include/exec/exec-all.h b/qemu/include/exec/exec-all.h
+index 884cfb2..5870ddf 100644
+--- a/qemu/include/exec/exec-all.h
++++ b/qemu/include/exec/exec-all.h
+@@ -314,11 +314,12 @@ struct TranslationBlock {
+ #define CF_INVALID     0x00040000 /* TB is stale. Set with @jmp_lock held */
+ #define CF_PARALLEL    0x00080000 /* Generate code for a parallel context */
+ #define CF_THUNK       0x00100000 /* TB calls a native pc */
++#define CF_X64E_SLOW   0x00200000 /* x64 engine: softmmu accesses (shadow MMU fallback) */
+ #define CF_CLUSTER_MASK 0xff000000 /* Top 8 bits are cluster ID */
+ #define CF_CLUSTER_SHIFT 24
+ /* cflags' mask for hashing/comparison */
+ #define CF_HASH_MASK   \
+-    (CF_COUNT_MASK | CF_LAST_IO | CF_USE_ICOUNT | CF_PARALLEL | CF_CLUSTER_MASK)
++    (CF_COUNT_MASK | CF_LAST_IO | CF_USE_ICOUNT | CF_PARALLEL | CF_CLUSTER_MASK | CF_X64E_SLOW)
+ 
+     /* Per-vCPU dynamic tracing state used to generate this TB */
+     uint32_t trace_vcpu_dstate;
+@@ -470,6 +471,13 @@ void tlb_set_dirty(CPUState *cpu, target_ulong vaddr);
+ 
+ /* exec.c */
+ void tb_flush_jmp_cache(CPUState *cpu, target_ulong addr);
++/* x64 engine: switch the TLB / jump cache to another address space (PCID) */
++void tlb_x64e_set_pcid(CPUState *cpu, uint16_t pcid, bool flush);
++void x64e_jc_remove(CPUState *cpu, unsigned int h, struct TranslationBlock *tb);
++void x64e_jc_clear_all(CPUState *cpu);
++/* x64 engine: shadow MMU (cputlb.c) */
++bool x64e_shadow_enabled(struct uc_struct *uc);
++void x64e_shadow_activate(CPUState *cpu, struct TranslationBlock *tb);
+ 
+ MemoryRegionSection *
+ address_space_translate_for_iotlb(CPUState *cpu, int asidx, hwaddr addr,
+diff --git a/qemu/include/hw/core/cpu.h b/qemu/include/hw/core/cpu.h
+index d1b7c25..b5b87ad 100644
+--- a/qemu/include/hw/core/cpu.h
++++ b/qemu/include/hw/core/cpu.h
+@@ -279,7 +279,9 @@ struct CPUState {
+     IcountDecr *icount_decr_ptr;
+ 
+     /* Accessed in parallel; all accesses must be atomic */
+-    struct TranslationBlock *tb_jmp_cache[TB_JMP_CACHE_SIZE];
++    /* x64 engine: points to the jump cache of the current address space (PCID) */
++    struct TranslationBlock **tb_jmp_cache;
++    struct TranslationBlock *tb_jmp_cache_own[TB_JMP_CACHE_SIZE];
+ 
+     QTAILQ_ENTRY(CPUState) node;
+ 
+@@ -325,6 +327,9 @@ static inline void cpu_tb_jmp_cache_clear(CPUState *cpu)
+ {
+     unsigned int i;
+ 
++    if (!cpu->tb_jmp_cache) {
++        cpu->tb_jmp_cache = cpu->tb_jmp_cache_own;
++    }
+     for (i = 0; i < TB_JMP_CACHE_SIZE; i++) {
+         cpu->tb_jmp_cache[i] = NULL;
+     }
+diff --git a/qemu/include/tcg/tcg.h b/qemu/include/tcg/tcg.h
+index f3643fe..7b43e77 100644
+--- a/qemu/include/tcg/tcg.h
++++ b/qemu/include/tcg/tcg.h
+@@ -622,6 +622,8 @@ struct TCGContext {
+ 
+     TCGRegSet reserved_regs;
+     uint32_t tb_cflags; /* cflags of the current TB */
++    bool x64e_direct;   /* x64 engine: guest accesses through the shadow MMU */
++    int x64e_user_idx;  /* ... with EL0 permissions (LDTR/STTR) for this MMU index */
+     intptr_t current_frame_offset;
+     intptr_t frame_start;
+     intptr_t frame_end;
 diff --git a/qemu/softmmu/vl.c b/qemu/softmmu/vl.c
 index 6860afd..94f8d72 100644
 --- a/qemu/softmmu/vl.c
@@ -223,10 +1381,30 @@ index 6860afd..94f8d72 100644
  }
  
 diff --git a/qemu/target/i386/excp_helper.c b/qemu/target/i386/excp_helper.c
-index f658c81..e03993f 100644
+index f658c81..5a8ea05 100644
 --- a/qemu/target/i386/excp_helper.c
 +++ b/qemu/target/i386/excp_helper.c
-@@ -644,8 +644,11 @@ do_check_protect_pse36:
+@@ -345,6 +345,11 @@ static hwaddr get_hphys(CPUState *cs, hwaddr gphys, MMUAccessType access_type,
+  * 0  = nothing more to do
+  * 1  = generate PF fault
+  */
++/* x64 engine: size of the guest page behind the last successful walk */
++target_ulong x64e_probe_page_size;
++/* ... and whether it is a user page */
++bool x64e_probe_user;
++
+ static int handle_mmu_fault(CPUState *cs, vaddr addr, int size,
+                             int is_write1, int mmu_idx)
+ {
+@@ -568,6 +573,7 @@ do_check_protect_pse36:
+         goto do_fault_rsvd;
+     }
+     ptep ^= PG_NX_MASK;
++    x64e_probe_user = (ptep & PG_USER_MASK) != 0;
+ 
+     /* can the page can be put in the TLB?  prot will tell us */
+     if (is_user && !(ptep & PG_USER_MASK)) {
+@@ -644,10 +650,14 @@ do_check_protect_pse36:
      assert(prot & (1 << is_write1));
  
      // Unicorn: indentity map guest virtual address to host virtual address
@@ -239,7 +1417,73 @@ index f658c81..e03993f 100644
 +    }
      //printf(">>> map address %"PRIx64" to %"PRIx64"\n", vaddr, paddr);
   
++    x64e_probe_page_size = page_size;
      tlb_set_page_with_attrs(cs, vaddr, paddr, cpu_get_mem_attrs(env),
+                             prot, mmu_idx, page_size);
+     return 0;
+@@ -677,6 +687,28 @@ do_check_protect_pse36:
+     return 1;
+ }
+ 
++/*
++ * x64 engine: walk the guest page tables for a shadow MMU fill without
++ * raising anything. Fills the softmmu TLB entry (and sets the guest's
++ * accessed / dirty bits) on success; returns false on a guest fault.
++ */
++bool x86_x64e_probe(CPUState *cs, vaddr addr, MMUAccessType access_type, int mmu_idx)
++{
++    X86CPU *cpu = X86_CPU(cs);
++    CPUX86State *env = &cpu->env;
++    target_ulong cr2 = env->cr[2];
++    int error_code = env->error_code;
++    int excp = cs->exception_index;
++
++    if (handle_mmu_fault(cs, addr, 1, access_type, mmu_idx)) {
++        env->cr[2] = cr2;
++        env->error_code = error_code;
++        cs->exception_index = excp;
++        return false;
++    }
++    return true;
++}
++
+ bool x86_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
+                       MMUAccessType access_type, int mmu_idx,
+                       bool probe, uintptr_t retaddr)
+diff --git a/qemu/target/i386/helper.c b/qemu/target/i386/helper.c
+index 8a3540e..a3808f8 100644
+--- a/qemu/target/i386/helper.c
++++ b/qemu/target/i386/helper.c
+@@ -146,6 +146,20 @@ void cpu_x86_update_cr0(CPUX86State *env, uint32_t new_cr0)
+    the PDPT */
+ void cpu_x86_update_cr3(CPUX86State *env, target_ulong new_cr3)
+ {
++#ifdef TARGET_X86_64
++    /* x64 engine: PCIDs, one TLB per address space (see cputlb.c) */
++    if ((env->cr[4] & CR4_PCIDE_MASK) && (env->hflags & HF_LMA_MASK) &&
++        env->uc->x86_system_mode) {
++        bool noflush = (new_cr3 >> 63) & 1;
++
++        new_cr3 &= ~(1ULL << 63);
++        env->cr[3] = new_cr3;
++        if (env->cr[0] & CR0_PG_MASK) {
++            tlb_x64e_set_pcid(env_cpu(env), new_cr3 & 0xfff, !noflush);
++        }
++        return;
++    }
++#endif
+     env->cr[3] = new_cr3;
+     if (env->cr[0] & CR0_PG_MASK) {
+         qemu_log_mask(CPU_LOG_MMU,
+@@ -162,7 +176,7 @@ void cpu_x86_update_cr4(CPUX86State *env, uint32_t new_cr4)
+     printf("CR4 update: %08x -> %08x\n", (uint32_t)env->cr[4], new_cr4);
+ #endif
+     if ((new_cr4 ^ env->cr[4]) &
+-        (CR4_PGE_MASK | CR4_PAE_MASK | CR4_PSE_MASK |
++        (CR4_PGE_MASK | CR4_PAE_MASK | CR4_PSE_MASK | CR4_PCIDE_MASK |
+          CR4_SMEP_MASK | CR4_SMAP_MASK | CR4_LA57_MASK)) {
+         tlb_flush(env_cpu(env));
+     }
 diff --git a/qemu/target/i386/seg_helper.c b/qemu/target/i386/seg_helper.c
 index 27efae9..83690a6 100644
 --- a/qemu/target/i386/seg_helper.c
@@ -303,10 +1547,18 @@ index 27efae9..83690a6 100644
          //              "Servicing hardware INT=0x%02x\n", intno);
          do_interrupt_x86_hardirq(env, intno, 1);
 diff --git a/qemu/target/i386/translate.c b/qemu/target/i386/translate.c
-index b60ac08..7b548fe 100644
+index b60ac08..813c817 100644
 --- a/qemu/target/i386/translate.c
 +++ b/qemu/target/i386/translate.c
-@@ -3348,8 +3348,10 @@ static void gen_sse(CPUX86State *env, DisasContext *s, int b,
+@@ -24,6 +24,7 @@
+ #include "tcg/tcg-op.h"
+ #include "exec/cpu_ldst.h"
+ #include "exec/translator.h"
++#include "exec/tb-hash.h"
+ 
+ #include "exec/helper-proto.h"
+ #include "exec/helper-gen.h"
+@@ -3348,8 +3349,10 @@ static void gen_sse(CPUX86State *env, DisasContext *s, int b,
          gen_illegal_opcode(s);
          return;
      }
@@ -318,10 +1570,19 @@ index b60ac08..7b548fe 100644
          goto unknown_op;
      }
 diff --git a/qemu/target/i386/unicorn.c b/qemu/target/i386/unicorn.c
-index 61ae52d..08c7db8 100644
+index 61ae52d..26f77e2 100644
 --- a/qemu/target/i386/unicorn.c
 +++ b/qemu/target/i386/unicorn.c
-@@ -178,6 +178,21 @@ void x86_reg_reset(struct uc_struct *uc)
+@@ -5,6 +5,8 @@
+ #include "uc_priv.h"
+ #include "sysemu/cpus.h"
+ #include "cpu.h"
++#include "exec/ram_addr.h"
++#include "exec/cpu-common.h"
+ #include "unicorn_common.h"
+ #include <unicorn/x86.h> /* needed for uc_x86_mmr */
+ #include "unicorn.h"
+@@ -178,6 +180,29 @@ void x86_reg_reset(struct uc_struct *uc)
      case UC_MODE_32:
          env->hflags |= HF_CS32_MASK | HF_SS32_MASK | HF_OSFXSR_MASK;
          cpu_x86_update_cr0(env, CR0_PE_MASK); // protected mode
@@ -337,13 +1598,21 @@ index 61ae52d..08c7db8 100644
 +            CPUID_EXT2_SYSCALL | CPUID_EXT2_NX;
 +        env->features[FEAT_8000_0001_EDX] &= ~CPUID_EXT2_3DNOW;
 +        env->features[FEAT_8000_0001_ECX] |= CPUID_EXT3_LAHF_LM;
++        if (uc->x86_system_mode && !uc->x64e_nopcid) {
++            env->features[FEAT_1_ECX] |= CPUID_EXT_PCID;
++        }
++        /* x64 engine: no SMAP, so kernel code has a single MMU mode and
++           shares one shadow tree with user code (see cputlb.c) */
++        if (uc->x86_system_mode) {
++            env->features[FEAT_7_0_EBX] &= ~CPUID_7_0_EBX_SMAP;
++        }
 +        // BMI1/BMI2 translation is unreliable in this TCG: hide them
 +        env->features[FEAT_7_0_EBX] &= ~(CPUID_7_0_EBX_BMI1 | CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ADX);
 +#endif
          break;
      case UC_MODE_64:
          env->hflags |= HF_CS32_MASK | HF_SS32_MASK | HF_CS64_MASK |
-@@ -1678,3 +1693,76 @@ void x86_uc_init(struct uc_struct *uc)
+@@ -1678,3 +1703,109 @@ void x86_uc_init(struct uc_struct *uc)
  }
  
  /* vim: set ts=4 sts=4 sw=4 et:  */
@@ -403,7 +1672,40 @@ index 61ae52d..08c7db8 100644
 +int uc_x86_set_system_mode(struct uc_struct *uc, int on)
 +{
 +    uc->x86_system_mode = on != 0;
++    /* x64 engine: PCIDs let the guest keep TLBs across context switches;
++       on & 2 leaves them out (for comparisons). Applied in x86_reg_reset. */
++    uc->x64e_nopcid = (on & 2) != 0;
++    if (uc->cpu) {
++        CPUArchState *env = uc->cpu->env_ptr;
++
++        if (on && !uc->x64e_nopcid) {
++            env->features[FEAT_1_ECX] |= CPUID_EXT_PCID;
++        } else {
++            env->features[FEAT_1_ECX] &= ~CPUID_EXT_PCID;
++        }
++        if (on) {
++            env->features[FEAT_7_0_EBX] &= ~CPUID_7_0_EBX_SMAP;
++        }
++    }
 +    return 0;
++}
++
++/* x64 engine: a device wrote guest RAM (DMA): drop code translated from it */
++UNICORN_EXPORT
++void uc_x86_invalidate_host(struct uc_struct *uc, void *host, size_t len)
++{
++    ram_addr_t ra;
++
++    if (!uc->cpu || len == 0) {
++        return;
++    }
++
++    ra = qemu_ram_addr_from_host(uc, host);
++    if (ra == RAM_ADDR_INVALID) {
++        return;
++    }
++
++    tb_invalidate_phys_range(uc, ra, ra + len);
 +}
 +
 +UNICORN_EXPORT
@@ -420,6 +1722,121 @@ index 61ae52d..08c7db8 100644
 +{
 +    cpu_exit(uc->cpu);
 +}
+diff --git a/qemu/tcg/aarch64/tcg-target.inc.c b/qemu/tcg/aarch64/tcg-target.inc.c
+index 8518561..bf718de 100644
+--- a/qemu/tcg/aarch64/tcg-target.inc.c
++++ b/qemu/tcg/aarch64/tcg-target.inc.c
+@@ -1804,6 +1804,75 @@ static void tcg_out_qemu_st_direct(TCGContext *s, MemOp memop,
+     }
+ }
+ 
++/*
++ * x64 engine: guest user-mode accesses through the shadow MMU use the
++ * unprivileged forms (LDTR*, STTR*), so the MMU checks them with EL0
++ * permissions. Address in X3, no offset.
++ */
++static void x64e_out_ld_unpriv(TCGContext *s, MemOp memop, TCGType ext, TCGReg data_r)
++{
++    const MemOp bswap = memop & MO_BSWAP;
++    uint32_t insn;
++
++    switch (memop & MO_SSIZE) {
++    case MO_UB: insn = 0x38400800; break;
++    case MO_SB: insn = ext ? 0x38800800 : 0x38c00800; break;
++    case MO_UW: insn = 0x78400800; break;
++    case MO_SW: insn = bswap ? 0x78400800 : (ext ? 0x78800800 : 0x78c00800); break;
++    case MO_UL: insn = 0xb8400800; break;
++    case MO_SL: insn = bswap ? 0xb8400800 : 0xb8800800; break;
++    case MO_Q:  insn = 0xf8400800; break;
++    default:
++        tcg_abort();
++    }
++    tcg_out32(s, insn | (TCG_REG_X3 << 5) | data_r);
++    if (bswap) {
++        switch (memop & MO_SIZE) {
++        case MO_16:
++            tcg_out_rev16(s, data_r, data_r);
++            if (memop & MO_SIGN) {
++                tcg_out_sxt(s, ext, MO_16, data_r, data_r);
++            }
++            break;
++        case MO_32:
++            tcg_out_rev32(s, data_r, data_r);
++            if (memop & MO_SIGN) {
++                tcg_out_sxt(s, TCG_TYPE_I64, MO_32, data_r, data_r);
++            }
++            break;
++        case MO_64:
++            tcg_out_rev64(s, data_r, data_r);
++            break;
++        default:
++            break;
++        }
++    }
++}
++
++static void x64e_out_st_unpriv(TCGContext *s, MemOp memop, TCGReg data_r)
++{
++    const MemOp bswap = memop & MO_BSWAP;
++    uint32_t insn;
++
++    switch (memop & MO_SIZE) {
++    case MO_8:  insn = 0x38000800; break;
++    case MO_16: insn = 0x78000800; break;
++    case MO_32: insn = 0xb8000800; break;
++    case MO_64: insn = 0xf8000800; break;
++    default:
++        tcg_abort();
++    }
++    if (bswap && data_r != TCG_REG_XZR) {
++        switch (memop & MO_SIZE) {
++        case MO_16: tcg_out_rev16(s, TCG_REG_TMP, data_r); data_r = TCG_REG_TMP; break;
++        case MO_32: tcg_out_rev32(s, TCG_REG_TMP, data_r); data_r = TCG_REG_TMP; break;
++        case MO_64: tcg_out_rev64(s, TCG_REG_TMP, data_r); data_r = TCG_REG_TMP; break;
++        default: break;
++        }
++    }
++    tcg_out32(s, insn | (TCG_REG_X3 << 5) | data_r);
++}
++
+ static void tcg_out_qemu_ld(TCGContext *s, TCGReg data_reg, TCGReg addr_reg,
+                             TCGMemOpIdx oi, TCGType ext)
+ {
+@@ -1813,6 +1882,17 @@ static void tcg_out_qemu_ld(TCGContext *s, TCGReg data_reg, TCGReg addr_reg,
+     unsigned mem_index = get_mmuidx(oi);
+     tcg_insn_unit *label_ptr;
+ 
++    if (s->x64e_direct) {
++        /* x64 engine: guest VA folded into TTBR1, the shadow MMU translates */
++        tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I64, TCG_REG_X3, addr_reg, 0xffff000000000000ull);
++        if (mem_index == s->x64e_user_idx) {
++            x64e_out_ld_unpriv(s, memop, ext, data_reg);
++        } else {
++            tcg_out_qemu_ld_direct(s, memop, ext, data_reg, TCG_REG_X3, TCG_TYPE_I64, TCG_REG_XZR);
++        }
++        return;
++    }
++
+     tcg_out_tlb_read(s, addr_reg, memop, &label_ptr, mem_index, 1);
+     tcg_out_qemu_ld_direct(s, memop, ext, data_reg,
+                            TCG_REG_X1, otype, addr_reg);
+@@ -1838,6 +1918,16 @@ static void tcg_out_qemu_st(TCGContext *s, TCGReg data_reg, TCGReg addr_reg,
+     unsigned mem_index = get_mmuidx(oi);
+     tcg_insn_unit *label_ptr;
+ 
++    if (s->x64e_direct) {
++        tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I64, TCG_REG_X3, addr_reg, 0xffff000000000000ull);
++        if (mem_index == s->x64e_user_idx) {
++            x64e_out_st_unpriv(s, memop, data_reg);
++        } else {
++            tcg_out_qemu_st_direct(s, memop, data_reg, TCG_REG_X3, TCG_TYPE_I64, TCG_REG_XZR);
++        }
++        return;
++    }
++
+     tcg_out_tlb_read(s, addr_reg, memop, &label_ptr, mem_index, 0);
+     tcg_out_qemu_st_direct(s, memop, data_reg,
+                            TCG_REG_X1, otype, addr_reg);
 diff --git a/qemu/tcg/tcg-op.c b/qemu/tcg/tcg-op.c
 index 37971d5..7777074 100644
 --- a/qemu/tcg/tcg-op.c

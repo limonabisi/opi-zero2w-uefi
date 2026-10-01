@@ -36,6 +36,14 @@ io_in (uc_engine *uc, uint32_t port, int size, void *opaque)
       break;
     default:
       v = 0xffffffff;
+      if (m->vnet.present) {
+        uint32_t base = pci_bar_io (&m->vnet.pci, 0);
+        if (base && port >= base && port < base + 0x40) {
+          vnet_io_read (m, &m->vnet, (uint16_t)(port - base), size, &v);
+          break;
+        }
+      }
+
       for (int i = 0; i < m->nvblk; i++) {
         uint32_t base = pci_bar_io (&m->vblk[i].pci, 0);
         if (base && port >= base && port < base + 0x40) {
@@ -97,6 +105,14 @@ io_out (uc_engine *uc, uint32_t port, int size, uint32_t val, void *opaque)
       pci_io_write (m, (uint16_t)port, size, val);
       break;
     default:
+      if (m->vnet.present) {
+        uint32_t base = pci_bar_io (&m->vnet.pci, 0);
+        if (base && port >= base && port < base + 0x40) {
+          vnet_io_write (m, &m->vnet, (uint16_t)(port - base), size, val);
+          break;
+        }
+      }
+
       for (int i = 0; i < m->nvblk; i++) {
         uint32_t base = pci_bar_io (&m->vblk[i].pci, 0);
         if (base && port >= base && port < base + 0x40) {
@@ -309,7 +325,7 @@ machine_init (machine_t *m, uint64_t ram_mb)
   }
 
   uc_ctl_set_cpu_model (m->uc, UC_CPU_X86_QEMU64);
-  uc_x86_set_system_mode (m->uc, 1);
+  uc_x86_set_system_mode (m->uc, getenv ("X64E_NOPCID") ? 3 : 1);
   uc_ctl_exits_enable (m->uc);          /* no stop address: we stop by kicks */
 
   m->ram_size = ram_mb << 20;
@@ -381,12 +397,65 @@ machine_add_disk (machine_t *m, void *disk, uint64_t size, int readonly)
   return 0;
 }
 
+/* attach the network card (virtio-net, slot 4, IRQ 9) */
+int
+machine_add_net (machine_t *m, const uint8_t mac[6])
+{
+  vnet_init (m, &m->vnet, 4, 9, mac);
+  return 0;
+}
+
+/* X64E_PCPROF: sample the guest PC at every return from the CPU loop */
+#define PROF_N 8192
+static uint64_t prof_pc[PROF_N];
+static uint32_t prof_cnt[PROF_N];
+
+static void
+prof_add (uint64_t pc)
+{
+  uint32_t h = (uint32_t)((pc >> 4) * 2654435761u) % PROF_N, i;
+
+  pc &= ~0xfULL;
+  for (i = 0; i < 64; i++, h = (h + 1) % PROF_N) {
+    if (prof_pc[h] == pc || prof_pc[h] == 0) {
+      prof_pc[h] = pc;
+      prof_cnt[h]++;
+      return;
+    }
+  }
+}
+
+static void
+prof_dump (void)
+{
+  int i, j;
+
+  for (j = 0; j < 60; j++) {
+    int best = -1;
+
+    for (i = 0; i < PROF_N; i++) {
+      if (prof_cnt[i] && (best < 0 || prof_cnt[i] > prof_cnt[best])) {
+        best = i;
+      }
+    }
+
+    if (best < 0) {
+      break;
+    }
+
+    host_log ("PROF %llx %u\n", (unsigned long long)prof_pc[best], prof_cnt[best]);
+    prof_cnt[best] = 0;
+  }
+}
+
 void
 machine_run (machine_t *m)
 {
+  int prof = getenv ("X64E_PCPROF") != NULL;
   uint64_t pc, now, next;
   uc_err   err;
-  uint64_t last_report = 0;
+  uint64_t last_report = 0, last_idle = 0;
+  int      trace = getenv ("X64E_TRACE") != NULL;
 
   pc = uc_x86_get_pc64 (m->uc);
   if (!getenv ("X64E_NOKICK")) {
@@ -397,6 +466,7 @@ machine_run (machine_t *m)
     pit_tick (m, now);
     uart_poll_input (m);
     host_poll_input (m);
+    vnet_poll (m, &m->vnet);
     if (m->reset_request || m->quit) {
       host_log ("\nx64e: %s\n", m->quit ? "stopped" : "guest reset");
       return;
@@ -405,7 +475,10 @@ machine_run (machine_t *m)
     m->runs++;
     err = uc_emu_start (m->uc, pc, 0xfffffffffffff001ULL, 0, 0);
     pc  = uc_x86_get_pc64 (m->uc);
-    if (getenv ("X64E_TRACE") && m->runs > 2000000 && m->runs < 2000010) {
+    if (prof) {
+      prof_add (pc);
+    }
+    if (trace && m->runs > 2000000 && m->runs < 2000010) {
       machine_dump (m, "trace");
     }
 
@@ -425,6 +498,15 @@ machine_run (machine_t *m)
     }
 
     if (uc_x86_is_halted (m->uc)) {
+      uint64_t fl = 0;
+
+      /* HLT with interrupts off: the guest powered off or stopped for good */
+      uc_reg_read (m->uc, UC_X86_REG_EFLAGS, &fl);
+      if (!(fl & 0x200)) {
+        host_log ("\nx64e: the x86 system halted (powered off)\n");
+        return;
+      }
+
       static int dumped;
       if (!dumped && getenv ("X64E_DUMP")) {
         dumped = 1;
@@ -438,6 +520,7 @@ machine_run (machine_t *m)
 
       if (next > now) {
         host_idle_until (next);
+        m->idle_ns += host_now_ns () - now;
       }
     }
 
@@ -445,11 +528,30 @@ machine_run (machine_t *m)
     if (now - last_report > 30000000000ULL) {
       uint64_t rip = uc_x86_get_pc64 (m->uc);
 
-      last_report = now;
-      host_log ("\n[x64e] %llus: %llu runs, %llu io, %llu irqs, rip %llx\n",
+      {
+        uint64_t sh[10];
+
+        uc_x64e_shadow_stats (m->uc, sh);
+        if (sh[0] || sh[1]) {
+          host_log ("\n[x64e] shadow: %llu fills, %llu slow (%llu #PF, %llu io, %llu code), %llu wprot, %llu drops,"
+                    " %llu large inv, %llu tables, %llu rmap\n",
+                    (unsigned long long)sh[0], (unsigned long long)sh[1], (unsigned long long)sh[6],
+                    (unsigned long long)sh[7], (unsigned long long)sh[8], (unsigned long long)sh[2],
+                    (unsigned long long)sh[3], (unsigned long long)sh[9], (unsigned long long)sh[4],
+                    (unsigned long long)sh[5]);
+        }
+      }
+      host_log ("\n[x64e] %llus: %llu runs, %llu io, %llu irqs, idle %llu%%, rip %llx\n",
                 (unsigned long long)(now / 1000000000ULL),
                 (unsigned long long)m->runs, (unsigned long long)m->io_exits,
-                (unsigned long long)m->irqs, (unsigned long long)rip);
+                (unsigned long long)m->irqs,
+                (unsigned long long)((m->idle_ns - last_idle) * 100 / (now - last_report + 1)),
+                (unsigned long long)rip);
+      last_idle   = m->idle_ns;
+      if (prof) {
+        prof_dump ();
+      }
+      last_report = now;
     }
   }
 }

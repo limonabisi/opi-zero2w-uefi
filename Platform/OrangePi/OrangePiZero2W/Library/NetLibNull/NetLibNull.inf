@@ -1,0 +1,21 @@
+## @file
+#  Empty NetLib for SnpDxe, which lists NetLib but calls none of it.
+#  (DxeNetLib carries a depex on EFI_RNG_PROTOCOL, which this board does not
+#  have, so SnpDxe would never be dispatched.)
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION    = 0x0001001B
+  BASE_NAME      = NetLibNull
+  FILE_GUID      = 3e0a7c55-9b1d-4f5e-8a21-6c0f4b2d9e71
+  MODULE_TYPE    = UEFI_DRIVER
+  VERSION_STRING = 1.0
+  LIBRARY_CLASS  = NetLib
+
+[Sources]
+  NetLibNull.c
+
+[Packages]
+  MdePkg/MdePkg.dec

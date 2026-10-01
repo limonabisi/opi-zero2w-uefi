@@ -82,6 +82,8 @@ vblk_process (machine_t *m, vblk_t *v)
           ok = 0;
         }
 
+        uc_x86_invalidate_host (m->uc, p, len);   /* DMA over translated code */
+
         off     += len;
         written += len;
       } else if (type == VIRTIO_BLK_T_OUT && !(flags & 2)) {

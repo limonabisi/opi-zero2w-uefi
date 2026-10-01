@@ -137,11 +137,44 @@ void vblk_init (machine_t *m, vblk_t *v, int slot, int irq, void *disk, uint64_t
 int  vblk_io_read (machine_t *m, vblk_t *v, uint16_t off, int size, uint32_t *val);
 void vblk_io_write (machine_t *m, vblk_t *v, uint16_t off, int size, uint32_t val);
 
+/* ----------------------------------------------------- virtio-net ---- */
+typedef struct {
+  pci_dev_t pci;
+  int       present;
+  uint8_t   mac[6];
+  uint32_t  guest_features, pfn[2];
+  uint16_t  last_avail[2], qsel;
+  uint8_t   status, isr;
+  uint8_t   pending[1600];
+  uint32_t  pending_len;
+  uint64_t  rx_frames, tx_frames;
+} vnet_t;
+
+/* host network: raw Ethernet frames; recv returns the length, 0 if none */
+int  host_net_send (const void *frame, uint32_t len);
+int  host_net_recv (void *frame, uint32_t max);
+void vnet_init (machine_t *m, vnet_t *v, int slot, int irq, const uint8_t mac[6]);
+void vnet_poll (machine_t *m, vnet_t *v);
+int  vnet_io_read (machine_t *m, vnet_t *v, uint16_t off, int size, uint32_t *val);
+void vnet_io_write (machine_t *m, vnet_t *v, uint16_t off, int size, uint32_t val);
+
 /* ------------------------------------------------------ ISO / boot ---- */
+/* a volume to boot from: an ISO9660 image or an ext2/3/4 partition */
+enum { FS_ISO = 0, FS_EXT4 = 1 };
+
 typedef struct {
   void    *disk;
-  uint32_t root_lba, root_size;
+  uint32_t root_lba, root_size;             /* ISO9660                  */
+  int      type;
+  uint64_t base;                            /* partition start (bytes)  */
+  uint32_t blksz, first_data_block, inodes_per_group, inode_size, desc_size;
 } iso_t;
+
+int  ext4_probe (iso_t *fs, void *disk, uint64_t base);
+int  ext4_lookup (iso_t *fs, const char *path, uint32_t *ino, uint64_t *size, int *is_dir);
+int  ext4_read (iso_t *fs, uint32_t ino, uint64_t off, void *dst, uint64_t len);
+/* find an installed Linux (ext2/3/4 with a GRUB config) on a disk */
+int  disk_find_linux (void *disk, uint64_t disk_size, iso_t *fs);
 
 #define MAX_BOOT_ENTRIES 16
 
@@ -189,6 +222,7 @@ struct machine {
   uint32_t    pci_addr;
   vblk_t      vblk[2];
   int         nvblk;
+  vnet_t      vnet;
   /* linear framebuffer (guest physical FB_BASE) */
   uint8_t    *fb;
   uint32_t    fb_w, fb_h, fb_stride;
@@ -197,7 +231,7 @@ struct machine {
   uint64_t    boot_ns;
   uint64_t    initrd_addr;
   /* statistics */
-  uint64_t    io_exits, irqs, runs;
+  uint64_t    io_exits, irqs, runs, idle_ns;
 };
 
 /* boot */
@@ -207,6 +241,7 @@ int linux_boot_setup (machine_t *m, const uint8_t *kernel, size_t ksize,
 int  machine_init (machine_t *m, uint64_t ram_mb);
 void machine_dump (machine_t *m, const char *why);
 int  machine_add_disk (machine_t *m, void *disk, uint64_t size, int readonly);
+int  machine_add_net (machine_t *m, const uint8_t mac[6]);
 int  machine_set_fb (machine_t *m, void *fb, uint32_t w, uint32_t h, uint32_t stride);
 #define FB_BASE  0xe0000000ULL
 int  machine_v2p (machine_t *m, uint64_t va, uint64_t *pa);

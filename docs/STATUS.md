@@ -7,7 +7,7 @@
 State: Active
 Codename: opizero2w
 SoC: Allwinner H618 (4x Cortex-A53, 1 GB LPDDR4)
-Version: 0.11.2-h618
+Version: 0.12.0-h618
 
 Contributors: limonabisi
 
@@ -40,7 +40,7 @@ Legend: ✅ Working · ⚠️ Partially working · ❌ Not working · ❓ Not te
 | Network Boot | No Ethernet on the board, no USB NIC driver | ❌ |
 | TPM | No hardware TPM | ❌ |
 | Windows Boot | Windows 10 ARM64 from a USB drive | ✅ |
-| x64 Engine | Whole x86-64 PC: the Ubuntu x86-64 installer runs on the board (HDMI, USB keyboard, ISO as disk); no network, slow | ⚠️ |
+| x64 Engine | Whole x86-64 PC: boots x86-64 ISOs and the installed system (HDMI, USB keyboard, ISO + hard disk on the SD card, network through a USB adapter / phone tethering). Shadow MMU: x86 memory accesses run directly on the ARM MMU (X64E.CFG `shadow=0` turns it off). Still slower than native | ⚠️ |
 | Linux Boot | Mainline H618 device tree is handed to the OS next to ACPI | ❓ |
 
 ## OS Status

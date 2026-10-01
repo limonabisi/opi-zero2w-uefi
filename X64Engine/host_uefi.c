@@ -20,9 +20,14 @@
 #include <Protocol/GraphicsOutput.h>
 #include <Protocol/BlockIo.h>
 #include <Protocol/SimpleFileSystem.h>
+#include <Protocol/SimpleNetwork.h>
+#include <Protocol/LoadedImage.h>
+#include <Protocol/DevicePath.h>
+#include <Protocol/Cpu.h>
 #include <Guid/FileInfo.h>
 
 #include "x64e.h"
+#include "x64e_el.h"
 
 int64_t efi_get_timer_ns (void);
 
@@ -155,9 +160,16 @@ key_available (void)
   return gBS->CheckEvent (gST->ConIn->WaitForKey) == EFI_SUCCESS;
 }
 
+static EFI_SIMPLE_NETWORK_PROTOCOL *mSnp;
+static uint64_t                     mNextPoll;
+
 void
 host_idle_until (uint64_t deadline)
 {
+  if (mSnp != NULL && deadline > mNextPoll) {
+    deadline = mNextPoll;                  /* wake up for the next network poll */
+  }
+
   while (host_now_ns () < deadline && !key_available () && !SerialPortPoll ()) {
     CpuSleep ();                           /* WFI: the 1 ms tick wakes us */
   }
@@ -272,9 +284,10 @@ typedef struct {
   EFI_BLOCK_IO_PROTOCOL *Bio;
   EFI_FILE_PROTOCOL     *File;
   UINT32                BlockSize;
+  UINT64                Base;              /* byte offset of the region on the device */
   UINT64                Size;
   UINT8                 *Bounce;           /* 64 KB */
-  CHAR16                Name[80];
+  CHAR16                Name[96];
 } HDISK;
 
 #define BOUNCE_SIZE  0x10000
@@ -285,6 +298,11 @@ bio_rw (HDISK *d, int write, uint64_t off, uint8_t *buf, uint32_t len)
   EFI_BLOCK_IO_PROTOCOL *b  = d->Bio;
   UINT32                 bs = d->BlockSize;
 
+  if (off + len > d->Size || off + len < off) {
+    return -1;                             /* never touch anything outside the region */
+  }
+
+  off += d->Base;
   while (len > 0) {
     UINT64     lba   = off / bs;
     UINT32     skip  = (UINT32)(off % bs);
@@ -475,6 +493,478 @@ scan_iso_files (void)
   FreePool (h);
 }
 
+/* ---------------------------------------------------------- network */
+/*
+ * The x86 machine's network card talks straight to a firmware SNP: phone
+ * USB tethering (RNDIS / CDC-NCM) or a USB Ethernet adapter (CDC-ECM).
+ * The guest uses the adapter's own MAC address, so the phone's DHCP server
+ * simply sees "the computer".
+ */
+#define TX_SLOTS  32
+#define TX_SIZE   1600
+
+static UINT8   *mTxBuf[TX_SLOTS];
+static BOOLEAN mTxBusy[TX_SLOTS];
+static uint64_t mBurstUntil;
+static uint64_t mTxFrames;
+static CHAR16  mNetName[80] = L"none - plug in a phone with USB tethering on, or a USB Ethernet adapter";
+
+static void
+net_recycle (void)
+{
+  VOID *buf;
+  UINTN i;
+
+  for (;;) {
+    buf = NULL;
+    if (EFI_ERROR (mSnp->GetStatus (mSnp, NULL, &buf)) || buf == NULL) {
+      return;
+    }
+
+    for (i = 0; i < TX_SLOTS; i++) {
+      if (mTxBuf[i] == buf) {
+        mTxBusy[i] = FALSE;
+      }
+    }
+  }
+}
+
+static int
+net_open (uint8_t mac[6])
+{
+  EFI_HANDLE                  *h;
+  UINTN                       n, i;
+  EFI_SIMPLE_NETWORK_PROTOCOL *snp;
+
+  if (EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleNetworkProtocolGuid, NULL, &n, &h))) {
+    return -1;
+  }
+
+  for (i = 0; i < n && mSnp == NULL; i++) {
+    if (EFI_ERROR (gBS->HandleProtocol (h[i], &gEfiSimpleNetworkProtocolGuid, (VOID **)&snp))) {
+      continue;
+    }
+
+    if (snp->Mode->State == EfiSimpleNetworkStopped) {
+      snp->Start (snp);
+    }
+
+    if (snp->Mode->State == EfiSimpleNetworkStarted) {
+      snp->Initialize (snp, 0, 0);
+    }
+
+    if (snp->Mode->State != EfiSimpleNetworkInitialized || snp->Mode->HwAddressSize != 6) {
+      continue;
+    }
+
+    /*
+     * Enable unicast + broadcast + multicast. A multicast list is passed on
+     * purpose: the USB network drivers only program the device's packet
+     * filter when one is given, and a phone passes nothing up until then.
+     */
+    {
+      EFI_MAC_ADDRESS mc[2];
+      UINT32          en = EFI_SIMPLE_NETWORK_RECEIVE_UNICAST | EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST;
+
+      ZeroMem (mc, sizeof (mc));
+      mc[0].Addr[0] = 0x33; mc[0].Addr[1] = 0x33; mc[0].Addr[5] = 0x01;   /* IPv6 all nodes */
+      mc[1].Addr[0] = 0x01; mc[1].Addr[2] = 0x5e; mc[1].Addr[5] = 0x01;   /* IPv4 all hosts */
+      if (snp->Mode->ReceiveFilterMask & EFI_SIMPLE_NETWORK_RECEIVE_MULTICAST) {
+        en |= EFI_SIMPLE_NETWORK_RECEIVE_MULTICAST;
+      }
+
+      if (EFI_ERROR (snp->ReceiveFilters (snp, en, 0, FALSE, (en & EFI_SIMPLE_NETWORK_RECEIVE_MULTICAST) ? 2 : 0,
+                                          (en & EFI_SIMPLE_NETWORK_RECEIVE_MULTICAST) ? mc : NULL))) {
+        snp->ReceiveFilters (snp, EFI_SIMPLE_NETWORK_RECEIVE_UNICAST | EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST,
+                             0, FALSE, 0, NULL);
+      }
+    }
+
+    CopyMem (mac, &snp->Mode->CurrentAddress, 6);
+    mSnp = snp;
+  }
+
+  FreePool (h);
+  if (mSnp == NULL) {
+    return -1;
+  }
+
+  for (i = 0; i < TX_SLOTS; i++) {
+    mTxBuf[i] = AllocatePool (TX_SIZE);
+  }
+
+  UnicodeSPrint (mNetName, sizeof (mNetName), L"USB network adapter %02x:%02x:%02x:%02x:%02x:%02x",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  host_log ("x64e: network card on the USB adapter %02x:%02x:%02x:%02x:%02x:%02x\n",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return 0;
+}
+
+int
+host_net_send (const void *frame, uint32_t len)
+{
+  UINTN i;
+
+  if (mSnp == NULL || len > TX_SIZE) {
+    return -1;
+  }
+
+  net_recycle ();
+  for (i = 0; i < TX_SLOTS; i++) {
+    if (!mTxBusy[i] && mTxBuf[i] != NULL) {
+      CopyMem (mTxBuf[i], frame, len);
+      if (EFI_ERROR (mSnp->Transmit (mSnp, 0, len, mTxBuf[i], NULL, NULL, NULL))) {
+        return -1;
+      }
+
+      mTxBusy[i]   = TRUE;
+      mTxFrames++;
+      mBurstUntil  = host_now_ns () + 300000000ULL;   /* an answer is likely: look often */
+      if (mNextPoll > host_now_ns () + 2000000ULL) {
+        mNextPoll = host_now_ns () + 2000000ULL;
+      }
+      return 0;
+    }
+  }
+
+  return -1;                               /* all buffers in flight: drop */
+}
+
+int
+host_net_recv (void *frame, uint32_t max)
+{
+  UINTN    len = max;
+  uint64_t now;
+
+  if (mSnp == NULL) {
+    return 0;
+  }
+
+  /* each empty poll costs a USB bulk-in timeout: back off when quiet */
+  now = host_now_ns ();
+  if (now < mNextPoll) {
+    return 0;
+  }
+
+  {
+    static uint64_t spent, calls, frames, last_report;
+    EFI_STATUS      st  = mSnp->Receive (mSnp, NULL, &len, frame, NULL, NULL, NULL);
+    uint64_t        end = host_now_ns ();
+
+    spent += end - now;
+    calls++;
+    if (!EFI_ERROR (st) && len > 0) {
+      frames++;
+    }
+
+    if (end - last_report > 30000000000ULL) {
+      host_log ("x64e: net: %lu frames out, %lu in, %lu polls, %lu ms spent polling\n", mTxFrames, frames, calls,
+                spent / 1000000);
+      last_report = end;
+    }
+
+    /*
+     * An empty poll costs a USB bulk-in timeout (a few ms), so poll often
+     * only while traffic is flowing and every 50 ms when the link is quiet.
+     */
+    if (EFI_ERROR (st) || len == 0) {
+      mNextPoll = end + (end < mBurstUntil ? 2000000ULL : 50000000ULL);
+      return 0;
+    }
+
+    mBurstUntil = end + 300000000ULL;
+  }
+
+  mNextPoll = 0;
+  return (int)len;
+}
+
+/* -------------------------------------------------------- hard disk */
+/*
+ * The x86 machine's hard disk: an x64disk*.img file on a FAT drive, or
+ * the free space of the microSD card behind the firmware's own partition
+ * (the card image only uses the first 64 MB).
+ */
+static HDISK   mHd;
+static BOOLEAN mHdPresent;
+static iso_t   mHdFs;
+static BOOLEAN mHdLinux;
+
+static BOOLEAN
+path_is_prefix (EFI_DEVICE_PATH_PROTOCOL *a, EFI_DEVICE_PATH_PROTOCOL *b)
+{
+  UINTN la = GetDevicePathSize (a) - END_DEVICE_PATH_LENGTH;
+
+  return la <= GetDevicePathSize (b) && CompareMem (a, b, la) == 0;
+}
+
+static void
+find_sd_free_space (EFI_HANDLE ImageHandle)
+{
+  EFI_LOADED_IMAGE_PROTOCOL *li;
+  EFI_DEVICE_PATH_PROTOCOL  *part, *dp;
+  EFI_HANDLE                *h;
+  UINTN                     n, i, k;
+  EFI_BLOCK_IO_PROTOCOL     *b;
+  UINT8                     *mbr;
+
+  if (EFI_ERROR (gBS->HandleProtocol (ImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&li)) ||
+      EFI_ERROR (gBS->HandleProtocol (li->DeviceHandle, &gEfiDevicePathProtocolGuid, (VOID **)&part)) ||
+      EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiBlockIoProtocolGuid, NULL, &n, &h))) {
+    return;
+  }
+
+  for (i = 0; i < n && !mHdPresent; i++) {
+    UINT64 end = 64ULL << 20, size;
+
+    if (EFI_ERROR (gBS->HandleProtocol (h[i], &gEfiBlockIoProtocolGuid, (VOID **)&b)) ||
+        b->Media->LogicalPartition || !b->Media->MediaPresent || b->Media->ReadOnly ||
+        EFI_ERROR (gBS->HandleProtocol (h[i], &gEfiDevicePathProtocolGuid, (VOID **)&dp)) ||
+        !path_is_prefix (dp, part) || b->Media->BlockSize != 512) {
+      continue;
+    }
+
+    /* the disk the engine was loaded from: free space after the last partition */
+    mbr = AllocatePool (512);
+    if (mbr == NULL || EFI_ERROR (b->ReadBlocks (b, b->Media->MediaId, 0, 512, mbr)) ||
+        mbr[510] != 0x55 || mbr[511] != 0xaa) {
+      if (mbr) FreePool (mbr);
+      continue;
+    }
+
+    for (k = 0; k < 4; k++) {
+      UINT8  *p     = mbr + 446 + k * 16;
+      UINT64 pend   = ((UINT64)(p[8] | (p[9] << 8) | (p[10] << 16) | ((UINT32)p[11] << 24)) +
+                       (p[12] | (p[13] << 8) | (p[14] << 16) | ((UINT32)p[15] << 24))) * 512;
+
+      if (p[4] == 0xee) {
+        end = MAX_UINT64;                  /* GPT: leave it alone */
+      } else if (p[4] != 0 && pend > end) {
+        end = pend;
+      }
+    }
+
+    FreePool (mbr);
+    end  = (end + (1ULL << 20) - 1) & ~((1ULL << 20) - 1);
+    size = MultU64x32 (b->Media->LastBlock + 1, 512);
+    if (end == MAX_UINT64 || end >= size || size - end < (2ULL << 30)) {
+      continue;
+    }
+
+    ZeroMem (&mHd, sizeof (mHd));
+    mHd.Bio       = b;
+    mHd.BlockSize = 512;
+    mHd.Base      = end;
+    mHd.Size      = size - end;
+    mHd.Bounce    = AllocatePages (EFI_SIZE_TO_PAGES (BOUNCE_SIZE));
+    if (mHd.Bounce != NULL) {
+      UnicodeSPrint (mHd.Name, sizeof (mHd.Name), L"microSD card free space (%lu GB)",
+                     DivU64x32 (mHd.Size, 1024 * 1024 * 1024));
+      mHdPresent = TRUE;
+    }
+  }
+
+  FreePool (h);
+}
+
+static BOOLEAN
+wcase_eq (CONST CHAR16 *a, CONST CHAR16 *b, UINTN n)
+{
+  for ( ; n > 0; n--, a++, b++) {
+    CHAR16 x = (*a >= L'A' && *a <= L'Z') ? *a + 32 : *a;
+    CHAR16 y = (*b >= L'A' && *b <= L'Z') ? *b + 32 : *b;
+
+    if (x != y) {
+      return FALSE;
+    }
+  }
+
+  return TRUE;
+}
+
+static void
+find_disk_file (void)
+{
+  EFI_HANDLE                      *h;
+  UINTN                           n, i;
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;
+  EFI_FILE_PROTOCOL               *root, *f;
+  UINT8                           buf[SIZE_OF_EFI_FILE_INFO + 512];
+
+  if (EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &n, &h))) {
+    return;
+  }
+
+  for (i = 0; i < n && !mHdPresent; i++) {
+    if (EFI_ERROR (gBS->HandleProtocol (h[i], &gEfiSimpleFileSystemProtocolGuid, (VOID **)&fs)) ||
+        EFI_ERROR (fs->OpenVolume (fs, &root))) {
+      continue;
+    }
+
+    for (;;) {
+      EFI_FILE_INFO *fi  = (EFI_FILE_INFO *)buf;
+      UINTN          len = sizeof (buf), nl;
+
+      if (EFI_ERROR (root->Read (root, &len, buf)) || len == 0) {
+        break;
+      }
+
+      nl = StrLen (fi->FileName);
+      if ((fi->Attribute & (EFI_FILE_DIRECTORY | EFI_FILE_READ_ONLY)) || nl < 11 ||
+          !wcase_eq (fi->FileName, L"x64disk", 7) || !wcase_eq (fi->FileName + nl - 4, L".img", 4) ||
+          fi->FileSize < (256ULL << 20)) {
+        continue;
+      }
+
+      if (!EFI_ERROR (root->Open (root, &f, fi->FileName, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0))) {
+        ZeroMem (&mHd, sizeof (mHd));
+        mHd.File = f;
+        mHd.Size = fi->FileSize;
+        UnicodeSPrint (mHd.Name, sizeof (mHd.Name), L"%s (%lu MB)", fi->FileName,
+                       DivU64x32 (fi->FileSize, 1024 * 1024));
+        mHdPresent = TRUE;
+        break;
+      }
+    }
+  }
+
+  FreePool (h);
+}
+
+static void
+flush_disks (void)
+{
+  if (mHdPresent) {
+    if (mHd.File != NULL) {
+      mHd.File->Flush (mHd.File);
+    } else if (mHd.Bio != NULL) {
+      mHd.Bio->FlushBlocks (mHd.Bio);
+    }
+  }
+}
+
+/* ------------------------------------------------------------ config */
+/*
+ * Optional \EFI\X64ENGINE\X64E.CFG next to the engine, "key=value" lines:
+ *   shadow=0   no shadow MMU (all guest accesses through the softmmu)
+ *   el1=0      stay at EL2 (implies shadow=0)
+ */
+static int mCfgShadow = 1, mCfgEl1 = 1;
+
+static void
+read_config (EFI_HANDLE ImageHandle)
+{
+  EFI_LOADED_IMAGE_PROTOCOL       *li;
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;
+  EFI_FILE_PROTOCOL               *root, *f;
+  char                            buf[512];
+  UINTN                           n = sizeof (buf) - 1, i;
+
+  if (EFI_ERROR (gBS->HandleProtocol (ImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&li)) ||
+      EFI_ERROR (gBS->HandleProtocol (li->DeviceHandle, &gEfiSimpleFileSystemProtocolGuid, (VOID **)&fs)) ||
+      EFI_ERROR (fs->OpenVolume (fs, &root))) {
+    return;
+  }
+
+  if (EFI_ERROR (root->Open (root, &f, L"\\EFI\\X64ENGINE\\X64E.CFG", EFI_FILE_MODE_READ, 0))) {
+    return;
+  }
+
+  if (!EFI_ERROR (f->Read (f, &n, buf))) {
+    buf[n] = 0;
+    for (i = 0; i < n; i++) {
+      if (strncmp (buf + i, "shadow=", 7) == 0) {
+        mCfgShadow = buf[i + 7] == '1';
+      } else if (strncmp (buf + i, "el1=", 4) == 0) {
+        mCfgEl1 = buf[i + 4] == '1';
+      }
+    }
+  }
+
+  f->Close (f);
+  host_log ("x64e: X64E.CFG: shadow=%d el1=%d\n", mCfgShadow, mCfgEl1);
+}
+
+/* ------------------------------------------------------- shadow MMU */
+/*
+ * Data aborts of direct guest accesses (TTBR1, see unicorn's cputlb.c):
+ * the shadow MMU maps the page and the access is retried, or the
+ * instruction is re-executed through the softmmu (guest page fault, I/O,
+ * write to translated code).
+ */
+#define SHADOW_POOL  (16 * 1024 * 1024)
+
+static uc_engine *mShadowUc;
+
+static void
+x64e_slowpath_entry (uint64_t host_pc)
+{
+  uc_x64e_slowpath (mShadowUc, host_pc);
+}
+
+STATIC VOID EFIAPI
+X64eSyncHandler (IN EFI_EXCEPTION_TYPE Type, IN OUT EFI_SYSTEM_CONTEXT Ctx)
+{
+  EFI_SYSTEM_CONTEXT_AARCH64 *c = Ctx.SystemContextAArch64;
+  int                        r  = mShadowUc != NULL ? uc_x64e_dabt (mShadowUc, c->FAR, c->ESR, c->ELR) : -1;
+
+  if (r == 0) {
+    return;
+  }
+
+  if (r == 1) {
+    c->X0  = c->ELR;
+    c->ELR = (UINT64)(UINTN)x64e_slowpath_entry;
+    return;
+  }
+
+  host_log ("\nx64e: unexpected exception: ESR %lx FAR %lx ELR %lx SP %lx LR %lx\n",
+            c->ESR, c->FAR, c->ELR, c->SP, c->LR);
+  CpuDeadLoop ();
+}
+
+static EFI_CPU_ARCH_PROTOCOL *
+shadow_start (uc_engine *uc)
+{
+  EFI_CPU_ARCH_PROTOCOL *cpu;
+  void                  *pool;
+
+  if (EFI_ERROR (gBS->LocateProtocol (&gEfiCpuArchProtocolGuid, NULL, (VOID **)&cpu))) {
+    return NULL;
+  }
+
+  pool = AllocatePages (EFI_SIZE_TO_PAGES (SHADOW_POOL));
+  if (pool == NULL) {
+    return NULL;
+  }
+
+  mShadowUc = uc;
+  if (cpu->RegisterInterruptHandler (cpu, EXCEPT_AARCH64_SYNCHRONOUS_EXCEPTIONS, X64eSyncHandler) ==
+      EFI_ALREADY_STARTED) {
+    cpu->RegisterInterruptHandler (cpu, EXCEPT_AARCH64_SYNCHRONOUS_EXCEPTIONS, NULL);
+    cpu->RegisterInterruptHandler (cpu, EXCEPT_AARCH64_SYNCHRONOUS_EXCEPTIONS, X64eSyncHandler);
+  }
+
+  if (uc_x64e_shadow_init (uc, pool, SHADOW_POOL) != 0) {
+    cpu->RegisterInterruptHandler (cpu, EXCEPT_AARCH64_SYNCHRONOUS_EXCEPTIONS, NULL);
+    FreePages (pool, EFI_SIZE_TO_PAGES (SHADOW_POOL));
+    mShadowUc = NULL;
+    return NULL;
+  }
+
+  host_log ("x64e: shadow MMU on (direct guest memory access)\n");
+  return cpu;
+}
+
+static void
+shadow_stop (EFI_CPU_ARCH_PROTOCOL *cpu)
+{
+  if (cpu != NULL) {
+    uc_x64e_shadow_fini (mShadowUc);
+    cpu->RegisterInterruptHandler (cpu, EXCEPT_AARCH64_SYNCHRONOUS_EXCEPTIONS, NULL);
+  }
+}
+
 /* ------------------------------------------------------------- menu */
 static INTN
 choose (CONST CHAR16 *Title, CHAR16 **Items, UINTN Count)
@@ -484,7 +974,10 @@ choose (CONST CHAR16 *Title, CHAR16 **Items, UINTN Count)
 
   for (;;) {
     gST->ConOut->ClearScreen (gST->ConOut);
-    Print (L"\n  x64 Engine - x86-64 PC for the Orange Pi Zero 2W\n\n  %s\n\n", Title);
+    Print (L"\n  x64 Engine - x86-64 PC for the Orange Pi Zero 2W\n\n");
+    Print (L"  Hard disk: %s\n  Network:   %s\n\n  %s\n\n",
+           mHdPresent ? mHd.Name : L"none - the microSD card has no free space and no x64disk.img was found",
+           mNetName, Title);
     for (i = 0; i < Count; i++) {
       gST->ConOut->SetAttribute (gST->ConOut, i == sel ? EFI_TEXT_ATTR (EFI_BLACK, EFI_LIGHTGRAY)
                                                         : EFI_TEXT_ATTR (EFI_LIGHTGRAY, EFI_BLACK));
@@ -539,19 +1032,35 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   static machine_t             m;
   static bootlist_t            bl;
   EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
-  CHAR16                       *items[MAX_SOURCES > MAX_BOOT_ENTRIES ? MAX_SOURCES : MAX_BOOT_ENTRIES];
+  CHAR16                       *items[MAX_SOURCES + 1 > MAX_BOOT_ENTRIES ? MAX_SOURCES + 1 : MAX_BOOT_ENTRIES];
   CHAR16                       titles[MAX_BOOT_ENTRIES][96];
-  iso_t                        iso;
-  INTN                         src, ent;
-  UINTN                        i;
+  CHAR16                       installed[128];
+  iso_t                        iso, *vol;
+  INTN                         sel, src, ent;
+  UINTN                        i, first;
   UINT64                       free_mb, guest_mb;
+  uint8_t                      mac[6];
+  BOOLEAN                      have_net;
 
   mT0 = (uint64_t)efi_get_timer_ns ();
   gBS->SetWatchdogTimer (0, 0, 0, NULL);
+  Print (L"\n  x64 Engine: looking for ISOs, the hard disk and the network...\n");
 
+  read_config (ImageHandle);
   scan_block_devices ();
   scan_iso_files ();
-  if (mSrcCount == 0) {
+  find_disk_file ();
+  if (!mHdPresent) {
+    find_sd_free_space (ImageHandle);
+  }
+
+  if (mHdPresent) {
+    mHdLinux = disk_find_linux (&mHd, mHd.Size, &mHdFs) ? TRUE : FALSE;
+  }
+
+  have_net = net_open (mac) == 0;
+
+  if (mSrcCount == 0 && !mHdLinux) {
     Print (L"\n  x64 Engine: no x86-64 ISO found.\n\n"
            L"  Write an ISO to a USB drive (balenaEtcher) or copy the .iso file\n"
            L"  to the root of a FAT drive, then try again.\n\n  Press any key.\n");
@@ -560,17 +1069,36 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   }
 
   for (;;) {
-    for (i = 0; i < mSrcCount; i++) {
-      items[i] = mSrc[i].Name;
+    first = 0;
+    if (mHdLinux) {
+      UnicodeSPrint (installed, sizeof (installed), L"Installed system on the hard disk");
+      items[first++] = installed;
     }
 
-    src = choose (L"Choose the x86-64 ISO:", items, mSrcCount);
-    if (src < 0) {
+    for (i = 0; i < mSrcCount; i++) {
+      items[first + i] = mSrc[i].Name;
+    }
+
+    sel = choose (L"Choose what to start:", items, first + mSrcCount);
+    if (sel < 0) {
       return EFI_ABORTED;
     }
 
-    if (iso_open (&iso, &mSrc[src]) || bootcfg_scan (&iso, &bl) == 0) {
-      Print (L"\n  No boot entries found on this ISO. Press any key.\n");
+    if ((UINTN)sel < first) {
+      src = -1;
+      vol = &mHdFs;
+    } else {
+      src = sel - (INTN)first;
+      vol = &iso;
+      if (iso_open (&iso, &mSrc[src])) {
+        Print (L"\n  This is not a readable ISO. Press any key.\n");
+        gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &i);
+        continue;
+      }
+    }
+
+    if (bootcfg_scan (vol, &bl) == 0) {
+      Print (L"\n  No boot entries found. Press any key.\n");
       gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &i);
       continue;
     }
@@ -580,7 +1108,7 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
       items[i] = titles[i];
     }
 
-    ent = choose (L"Choose what to start:", items, bl.count);
+    ent = bl.count == 1 ? 0 : choose (L"Choose the menu entry:", items, bl.count);
     if (ent >= 0) {
       break;
     }
@@ -595,7 +1123,7 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
    * (USB DMA buffers etc.).
    */
   free_mb  = free_memory_mb ();
-  guest_mb = free_mb > 100 + 32 + 128 + 128 ? free_mb - 100 - 32 - 128 : 128;
+  guest_mb = free_mb > 100 + 32 + 128 + 128 + 24 ? free_mb - 100 - 32 - 128 - 24 : 128;
   guest_mb = guest_mb > 1024 ? 1024 : guest_mb & ~31ULL;
   host_log ("x64e: %lu MB free, %lu MB for the x86 machine\n", free_mb, guest_mb);
   Print (L"  Memory: %lu MB free, %lu MB for the x86 machine\n", free_mb, guest_mb);
@@ -607,7 +1135,22 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
 
   host_log ("x64e: %u MB guest RAM\n", (unsigned)(m.ram_size >> 20));
   m.boot_ns = epoch_seconds () * 1000000000ULL;
-  machine_add_disk (&m, &mSrc[src], mSrc[src].Size, 1);
+
+  /* the hard disk is always the first disk (vda), the ISO the second */
+  if (mHdPresent) {
+    machine_add_disk (&m, &mHd, mHd.Size, 0);
+    host_log ("x64e: hard disk: %s\n", mHdLinux ? "installed system found" : "empty or unknown");
+  }
+
+  if (src >= 0) {
+    machine_add_disk (&m, &mSrc[src], mSrc[src].Size, 1);
+  }
+
+  if (have_net) {
+    machine_add_net (&m, mac);
+  }
+
+  Print (L"  Hard disk: %s\n  Network:   %s\n", mHdPresent ? mHd.Name : L"none", mNetName);
 
   if (!EFI_ERROR (gBS->HandleProtocol (gST->ConsoleOutHandle, &gEfiGraphicsOutputProtocolGuid, (VOID **)&gop)) ||
       !EFI_ERROR (gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&gop))) {
@@ -619,8 +1162,8 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
     }
   }
 
-  if (iso_boot (&m, &iso, &bl.e[ent], "console=ttyS0,115200 console=tty0 loglevel=6 nolapic noapic")) {
-    Print (L"  Could not load the kernel from the ISO. Press any key.\n");
+  if (iso_boot (&m, vol, &bl.e[ent], "console=ttyS0,115200 console=tty0 loglevel=6 nolapic noapic")) {
+    Print (L"  Could not load the kernel. Press any key.\n");
     gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &i);
     return EFI_LOAD_ERROR;
   }
@@ -629,8 +1172,38 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
     SetMem (m.fb, (UINTN)m.fb_stride * m.fb_h, 0);
   }
 
-  machine_run (&m);
+  /*
+   * Run at EL1 so that TTBR1 is free for the x86 address space (the
+   * firmware keeps working there, see x64e_el.c).
+   */
+  {
+    uint64_t fw_vbar = 0, fw_hcr = 0;
+    BOOLEAN  el1     = FALSE;
+
+    if (x64e_current_el () == 2 && mCfgEl1) {
+      fw_vbar = x64e_read_vbar_el2 ();
+      fw_hcr  = x64e_read_hcr_el2 ();
+      x64e_enter_el1 ((uint64_t)(UINTN)x64e_el2_vectors,
+                      X64E_TCR_EPD1 | (16ULL << 16) | (2ULL << 30) | (1ULL << 24) | (1ULL << 26) | (3ULL << 28));
+      el1 = TRUE;
+    }
+
+    host_log ("x64e: running at EL%lu\n", x64e_current_el ());
+    {
+      EFI_CPU_ARCH_PROTOCOL *shadow = el1 && mCfgShadow ? shadow_start (m.uc) : NULL;
+
+      machine_run (&m);
+      shadow_stop (shadow);
+    }
+
+    if (el1) {
+      x64e_leave_el1 (fw_vbar, fw_hcr);
+      host_log ("x64e: back at EL%lu\n", x64e_current_el ());
+    }
+  }
+
   stop_kick_timer ();
+  flush_disks ();
 
   /* back to the firmware: restore its console */
   gST->ConOut->Reset (gST->ConOut, FALSE);

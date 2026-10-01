@@ -212,7 +212,7 @@
   # 1 ms system tick (x64 Engine CPU loop, default 10 ms)
   gEmbeddedTokenSpaceGuid.PcdTimerPeriod|10000
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"Orange Pi Zero 2W EDK2 port"
-  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.11.2-h618"
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"0.12.0-h618"
 
   gEfiMdePkgTokenSpaceGuid.PcdMaximumUnicodeStringLength|1000000
   gEfiMdePkgTokenSpaceGuid.PcdMaximumAsciiStringLength|1000000
@@ -461,6 +461,33 @@
   MdeModulePkg/Bus/Usb/UsbKbDxe/UsbKbDxe.inf
   MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassStorageDxe.inf
   MdeModulePkg/Bus/Usb/UsbMouseAbsolutePointerDxe/UsbMouseAbsolutePointerDxe.inf
+
+  #
+  # USB network (phone USB tethering: RNDIS / CDC-NCM, USB Ethernet: CDC-ECM)
+  # -> SNP, used by the x64 Engine's network card. No IP stack in the firmware.
+  #
+  MdeModulePkg/Bus/Usb/UsbNetwork/NetworkCommon/NetworkCommon.inf {
+    <PcdsFixedAtBuild>
+      gEfiMdePkgTokenSpaceGuid.PcdDebugPrintErrorLevel|0x80000000   # no per-packet dumps
+  }
+  MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndis.inf {
+    <PcdsFixedAtBuild>
+      gEfiMdePkgTokenSpaceGuid.PcdDebugPrintErrorLevel|0x80000000   # no per-packet dumps
+  }
+  MdeModulePkg/Bus/Usb/UsbNetwork/UsbCdcNcm/UsbCdcNcm.inf {
+    <PcdsFixedAtBuild>
+      gEfiMdePkgTokenSpaceGuid.PcdDebugPrintErrorLevel|0x80000000   # no per-packet dumps
+  }
+  MdeModulePkg/Bus/Usb/UsbNetwork/UsbCdcEcm/UsbCdcEcm.inf {
+    <PcdsFixedAtBuild>
+      gEfiMdePkgTokenSpaceGuid.PcdDebugPrintErrorLevel|0x80000000   # no per-packet dumps
+  }
+  NetworkPkg/SnpDxe/SnpDxe.inf {
+    <LibraryClasses>
+      NetLib|Platform/OrangePi/OrangePiZero2W/Library/NetLibNull/NetLibNull.inf
+    <PcdsFixedAtBuild>
+      gEfiMdePkgTokenSpaceGuid.PcdDebugPrintErrorLevel|0x80000000   # no per-packet dumps
+  }
 
   #
   # Storage + filesystems
