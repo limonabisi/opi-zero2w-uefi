@@ -1,0 +1,129 @@
+diff --git a/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndis.c b/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndis.c
+index cc8e076..d0fd28e 100644
+--- a/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndis.c
++++ b/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndis.c
+@@ -8,6 +8,18 @@
+ 
+ #include "UsbRndis.h"
+ 
++//
++// RNDIS control interface: Microsoft's CDC-ACM/vendor form, the misc-class
++// form, and the wireless-controller form that Android phones (Linux
++// f_rndis) use for USB tethering.
++//
++#define IS_RNDIS_CONTROL(Desc) \
++  ((((Desc).InterfaceClass == USB_CDC_CLASS) && ((Desc).InterfaceSubClass == USB_CDC_ACM_SUBCLASS) && \
++    ((Desc).InterfaceProtocol == USB_VENDOR_PROTOCOL)) || \
++   (((Desc).InterfaceClass == USB_MISC_CLASS) && ((Desc).InterfaceSubClass == USB_RNDIS_SUBCLASS) && \
++    ((Desc).InterfaceProtocol == USB_RNDIS_ETHERNET_PROTOCOL)) || \
++   (((Desc).InterfaceClass == 0xE0) && ((Desc).InterfaceSubClass == 0x01) && ((Desc).InterfaceProtocol == 0x03)))
++
+ EFI_DRIVER_BINDING_PROTOCOL  gUsbRndisDriverBinding = {
+   UsbRndisDriverSupported,
+   UsbRndisDriverStart,
+@@ -40,12 +52,7 @@ IsSupportedDevice (
+   }
+ 
+   // Check specific device/RNDIS and CDC-DATA
+-  if (((InterfaceDescriptor.InterfaceClass == USB_CDC_CLASS) &&
+-       (InterfaceDescriptor.InterfaceSubClass == USB_CDC_ACM_SUBCLASS) &&
+-       (InterfaceDescriptor.InterfaceProtocol == USB_VENDOR_PROTOCOL)) || \
+-      ((InterfaceDescriptor.InterfaceClass == USB_MISC_CLASS) &&
+-       (InterfaceDescriptor.InterfaceSubClass == USB_RNDIS_SUBCLASS) &&
+-       (InterfaceDescriptor.InterfaceProtocol == USB_RNDIS_ETHERNET_PROTOCOL)) || \
++  if (IS_RNDIS_CONTROL (InterfaceDescriptor) || \
+       ((InterfaceDescriptor.InterfaceClass == USB_CDC_DATA_CLASS) &&
+        (InterfaceDescriptor.InterfaceSubClass == USB_CDC_DATA_SUBCLASS) &&
+        (InterfaceDescriptor.InterfaceProtocol == USB_NO_CLASS_PROTOCOL))
+@@ -79,13 +86,7 @@ IsRndisInterface (
+   }
+ 
+   // Check for specific device/RNDIS and CDC-DATA
+-  if (((InterfaceDescriptor.InterfaceClass == USB_CDC_CLASS) &&
+-       (InterfaceDescriptor.InterfaceSubClass == USB_CDC_ACM_SUBCLASS) &&
+-       (InterfaceDescriptor.InterfaceProtocol == USB_VENDOR_PROTOCOL)) || \
+-      ((InterfaceDescriptor.InterfaceClass == USB_MISC_CLASS) &&
+-       (InterfaceDescriptor.InterfaceSubClass == USB_RNDIS_SUBCLASS) &&
+-       (InterfaceDescriptor.InterfaceProtocol == USB_RNDIS_ETHERNET_PROTOCOL))
+-      )
++  if (IS_RNDIS_CONTROL (InterfaceDescriptor))
+   {
+     return TRUE;
+   }
+@@ -188,9 +189,7 @@ IsUsbRndis (
+   }
+ 
+   // Check for Rndis
+-  if ((InterfaceDescriptor.InterfaceClass == USB_CDC_CLASS) &&
+-      (InterfaceDescriptor.InterfaceSubClass == USB_CDC_ACM_SUBCLASS) &&
+-      (InterfaceDescriptor.InterfaceProtocol == USB_VENDOR_PROTOCOL))
++  if (IS_RNDIS_CONTROL (InterfaceDescriptor))
+   {
+     return TRUE;
+   }
+diff --git a/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndisFunction.c b/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndisFunction.c
+index 8723a82..27cde82 100644
+--- a/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndisFunction.c
++++ b/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndisFunction.c
+@@ -907,7 +907,50 @@ SetUsbRndisPacketFilter (
+   IN UINT16                       Value
+   )
+ {
+-  return EFI_SUCCESS;
++  USB_RNDIS_DEVICE  *UsbRndisDevice;
++  struct {
++    REMOTE_NDIS_SET_MSG    SetMsg;
++    UINT32                 Filter;
++  } RndisSetMsg;
++  REMOTE_NDIS_SET_CMPLT  RndisSetCmplt;
++  EFI_STATUS             Status;
++
++  //
++  // An RNDIS device passes no data until a packet filter is set. Callers
++  // hand in PXE or CDC filter bits depending on the path, so always ask for
++  // everything the network stack may need (unicast to us, broadcast, all
++  // multicast): the stack filters further in software.
++  //
++  UsbRndisDevice = USB_RNDIS_DEVICE_FROM_THIS (This);
++
++  ZeroMem (&RndisSetMsg, sizeof (RndisSetMsg));
++  ZeroMem (&RndisSetCmplt, sizeof (RndisSetCmplt));
++
++  RndisSetMsg.SetMsg.MessageType             = RNDIS_SET_MSG;
++  RndisSetMsg.SetMsg.MessageLength           = sizeof (RndisSetMsg);
++  RndisSetMsg.SetMsg.RequestID               = UsbRndisDevice->RequestId;
++  RndisSetMsg.SetMsg.Oid                     = OID_GEN_CURRENT_PACKET_FILTER;
++  RndisSetMsg.SetMsg.InformationBufferLength = sizeof (UINT32);
++  RndisSetMsg.SetMsg.InformationBufferOffset = sizeof (REMOTE_NDIS_SET_MSG) - 8;
++  RndisSetMsg.Filter                         = NDIS_PACKET_TYPE_DIRECTED | NDIS_PACKET_TYPE_MULTICAST |
++                                               NDIS_PACKET_TYPE_ALL_MULTICAST | NDIS_PACKET_TYPE_BROADCAST;
++
++  RndisSetCmplt.MessageType   = RNDIS_SET_CMPLT;
++  RndisSetCmplt.MessageLength = sizeof (REMOTE_NDIS_SET_CMPLT);
++
++  Status = RndisControlMsg (
++             UsbRndisDevice,
++             (REMOTE_NDIS_MSG_HEADER *)&RndisSetMsg,
++             (REMOTE_NDIS_MSG_HEADER *)&RndisSetCmplt
++             );
++  UsbRndisDevice->RequestId++;
++
++  if (!EFI_ERROR (Status) && (RndisSetCmplt.Status != 0)) {
++    Status = EFI_DEVICE_ERROR;
++  }
++
++  DEBUG ((DEBUG_INFO, "SetUsbRndisPacketFilter: %r (device status %x)\n", Status, RndisSetCmplt.Status));
++  return Status;
+ }
+ 
+ /**
+@@ -1112,6 +1155,9 @@ RndisUndiInitialize (
+   DEBUG ((DEBUG_INFO, "MaxTransferSize : %x\n", RndisInitMsgCmplt.MaxTransferSize));
+   DEBUG ((DEBUG_INFO, "PacketAlignmentFactor : %x\n", RndisInitMsgCmplt.PacketAlignmentFactor));
+ 
++  // Without a packet filter the device never sends received frames
++  SetUsbRndisPacketFilter (UsbEthDriver, 0);
++
+   return Status;
+ }
+ 

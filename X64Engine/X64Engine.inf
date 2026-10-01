@@ -62,6 +62,7 @@
   gEfiLoadedImageProtocolGuid
   gEfiDevicePathProtocolGuid
   gEfiCpuArchProtocolGuid
+  gEfiUsbIoProtocolGuid
 
 [Guids]
   gEfiFileInfoGuid

@@ -19,6 +19,7 @@
 #include <Library/DevicePathLib.h>
 #include <Protocol/GraphicsOutput.h>
 #include <Protocol/BlockIo.h>
+#include <Protocol/UsbIo.h>
 #include <Protocol/SimpleFileSystem.h>
 #include <Protocol/SimpleNetwork.h>
 #include <Protocol/LoadedImage.h>
@@ -281,8 +282,16 @@ host_free (void *p, size_t size)
 
 /* ------------------------------------------------------------ disks */
 typedef struct {
+  UINT64  Logical;                         /* offset in the file */
+  UINT64  Dev;                             /* offset on the device region */
+  UINT64  Len;
+} EXTENT;
+
+typedef struct {
   EFI_BLOCK_IO_PROTOCOL *Bio;
   EFI_FILE_PROTOCOL     *File;
+  EXTENT                *Ext;              /* file on a raw-read file system (exFAT) */
+  UINT32                NExt;
   UINT32                BlockSize;
   UINT64                Base;              /* byte offset of the region on the device */
   UINT64                Size;
@@ -342,11 +351,72 @@ bio_rw (HDISK *d, int write, uint64_t off, uint8_t *buf, uint32_t len)
   return 0;
 }
 
+/* read a file that is a list of extents on its device region */
+static int
+ext_read (HDISK *d, uint64_t off, uint8_t *buf, uint32_t len)
+{
+  UINT32 lo = 0, hi = d->NExt;
+
+  if (off + len > d->Size || off + len < off) {
+    return -1;
+  }
+
+  while (len > 0) {
+    EXTENT *e;
+    UINT64  n;
+
+    /* binary search: last extent with Logical <= off */
+    lo = 0;
+    hi = d->NExt;
+    while (hi - lo > 1) {
+      UINT32 mid = (lo + hi) / 2;
+
+      if (d->Ext[mid].Logical <= off) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+
+    e = &d->Ext[lo];
+    if (off < e->Logical || off >= e->Logical + e->Len) {
+      return -1;
+    }
+
+    n = e->Logical + e->Len - off;
+    if (n > len) {
+      n = len;
+    }
+
+    {
+      UINT64 size = d->Size;
+      int    r;
+
+      d->Size = (UINT64)-1;                /* region bound checked above */
+      r       = bio_rw (d, 0, e->Dev + (off - e->Logical), buf, (uint32_t)n);
+      d->Size = size;
+      if (r) {
+        return -1;
+      }
+    }
+
+    off += n;
+    buf += n;
+    len -= (uint32_t)n;
+  }
+
+  return 0;
+}
+
 int
 host_disk_read (void *disk, uint64_t off, void *buf, uint32_t len)
 {
   HDISK *d = disk;
   UINTN  n = len;
+
+  if (d->Ext != NULL) {
+    return ext_read (d, off, buf, len);
+  }
 
   if (d->File != NULL) {
     if (EFI_ERROR (d->File->SetPosition (d->File, off)) ||
@@ -366,6 +436,10 @@ host_disk_write (void *disk, uint64_t off, const void *buf, uint32_t len)
   HDISK *d = disk;
   UINTN  n = len;
 
+  if (d->Ext != NULL) {
+    return -1;                             /* ISOs on exFAT are read-only */
+  }
+
   if (d->File != NULL) {
     if (EFI_ERROR (d->File->SetPosition (d->File, off)) ||
         EFI_ERROR (d->File->Write (d->File, &n, (void *)buf)) || n != len) {
@@ -379,7 +453,7 @@ host_disk_write (void *disk, uint64_t off, const void *buf, uint32_t len)
 }
 
 /* ------------------------------------------------------ ISO sources */
-#define MAX_SOURCES  12
+#define MAX_SOURCES  24
 
 static HDISK mSrc[MAX_SOURCES];
 static UINTN mSrcCount;
@@ -436,13 +510,66 @@ ends_with_iso (CONST CHAR16 *e)
 }
 
 static void
+scan_fat_dir (EFI_FILE_PROTOCOL *dir, UINTN depth)
+{
+  EFI_FILE_PROTOCOL *f;
+  UINTN             bufsz = SIZE_OF_EFI_FILE_INFO + 512;
+  UINT8             *buf  = AllocatePool (bufsz);
+
+  if (buf == NULL) {
+    return;
+  }
+
+  while (mSrcCount < MAX_SOURCES) {
+    EFI_FILE_INFO *fi  = (EFI_FILE_INFO *)buf;
+    UINTN          len = bufsz;
+    UINTN          nl;
+
+    if (EFI_ERROR (dir->Read (dir, &len, buf)) || len == 0) {
+      break;
+    }
+
+    nl = StrLen (fi->FileName);
+    if (fi->Attribute & EFI_FILE_DIRECTORY) {
+      if (depth < 3 && fi->FileName[0] != L'.' && StrCmp (fi->FileName, L"System Volume Information") != 0 &&
+          !EFI_ERROR (dir->Open (dir, &f, fi->FileName, EFI_FILE_MODE_READ, 0))) {
+        scan_fat_dir (f, depth + 1);
+        f->Close (f);
+      }
+
+      continue;
+    }
+
+    if (nl < 5 || !ends_with_iso (fi->FileName + nl - 4)) {
+      continue;
+    }
+
+    if (!EFI_ERROR (dir->Open (dir, &f, fi->FileName, EFI_FILE_MODE_READ, 0))) {
+      HDISK *d = &mSrc[mSrcCount];
+
+      ZeroMem (d, sizeof (*d));
+      d->File = f;
+      d->Size = fi->FileSize;
+      UnicodeSPrint (d->Name, sizeof (d->Name), L"%s (%lu MB)", fi->FileName,
+                     DivU64x32 (fi->FileSize, 1024 * 1024));
+      if (is_iso (d)) {
+        mSrcCount++;
+      } else {
+        f->Close (f);
+      }
+    }
+  }
+
+  FreePool (buf);
+}
+
+static void
 scan_iso_files (void)
 {
   EFI_HANDLE                      *h;
   UINTN                           n, i;
   EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;
-  EFI_FILE_PROTOCOL               *root, *f;
-  UINT8                           buf[SIZE_OF_EFI_FILE_INFO + 512];
+  EFI_FILE_PROTOCOL               *root;
 
   if (EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &n, &h))) {
     return;
@@ -454,40 +581,298 @@ scan_iso_files (void)
       continue;
     }
 
-    for (;;) {
-      EFI_FILE_INFO *fi  = (EFI_FILE_INFO *)buf;
-      UINTN          len = sizeof (buf);
-      UINTN          nl;
+    scan_fat_dir (root, 0);
+  }
 
-      if (EFI_ERROR (root->Read (root, &len, buf)) || len == 0) {
-        break;
-      }
+  FreePool (h);
+}
 
-      nl = StrLen (fi->FileName);
-      if ((fi->Attribute & EFI_FILE_DIRECTORY) || nl < 5 ||
-          !ends_with_iso (fi->FileName + nl - 4)) {
-        continue;
-      }
+/*
+ * ISO files on exFAT (Ventoy's default data partition, most big USB drives):
+ * the firmware has no exFAT driver, so read the directory tree ourselves
+ * and hand the ISO to the machine as a list of extents on the partition.
+ */
+typedef struct {
+  HDISK   Part;                            /* the partition, Base 0 */
+  UINT32  ClusShift;                       /* log2 bytes per cluster */
+  UINT64  FatOff;
+  UINT64  HeapOff;
+  UINT32  ClusterCount;
+  UINT8   FatPage[4096];
+  UINT64  FatPageOff;
+} EXFAT;
 
-      if (!EFI_ERROR (root->Open (root, &f, fi->FileName, EFI_FILE_MODE_READ, 0))) {
-        HDISK *d = &mSrc[mSrcCount];
+static UINT32
+exfat_next (EXFAT *fs, UINT32 c)
+{
+  UINT64 off = fs->FatOff + (UINT64)c * 4;
+  UINT64 pg  = off & ~4095ULL;
 
-        ZeroMem (d, sizeof (*d));
-        d->File = f;
-        d->Size = fi->FileSize;
-        UnicodeSPrint (d->Name, sizeof (d->Name), L"%s (%lu MB)", fi->FileName,
-                       DivU64x32 (fi->FileSize, 1024 * 1024));
-        if (is_iso (d) && mSrcCount < MAX_SOURCES) {
-          mSrcCount++;
-        } else {
-          f->Close (f);
+  if (pg != fs->FatPageOff) {
+    if (host_disk_read (&fs->Part, pg, fs->FatPage, sizeof (fs->FatPage))) {
+      return 0xFFFFFFFF;
+    }
+
+    fs->FatPageOff = pg;
+  }
+
+  return *(UINT32 *)(fs->FatPage + (off - pg));
+}
+
+/* extents of a cluster chain; Len = 0 means "until the end of the chain" */
+static EXTENT *
+exfat_extents (EXFAT *fs, UINT32 first, UINT64 len, BOOLEAN nofat, UINT32 *count, UINT64 *total)
+{
+  UINT64  csize = 1ULL << fs->ClusShift;
+  UINT32  max, n = 0, c = first, walked = 0;
+  EXTENT  *e;
+
+  *count = 0;
+  *total = 0;
+  if (first < 2 || first - 2 >= fs->ClusterCount) {
+    return NULL;
+  }
+
+  if (nofat) {
+    e = AllocateZeroPool (sizeof (EXTENT));
+    if (e != NULL) {
+      e->Dev = fs->HeapOff + ((UINT64)(first - 2) << fs->ClusShift);
+      e->Len = len;
+      *count = 1;
+      *total = len;
+    }
+
+    return e;
+  }
+
+  max = 64;
+  e   = AllocateZeroPool (max * sizeof (EXTENT));
+  while (e != NULL && c >= 2 && c - 2 < fs->ClusterCount && walked++ <= fs->ClusterCount) {
+    UINT64 dev = fs->HeapOff + ((UINT64)(c - 2) << fs->ClusShift);
+
+    if (len != 0 && *total >= len) {
+      break;
+    }
+
+    if (n > 0 && e[n - 1].Dev + e[n - 1].Len == dev) {
+      e[n - 1].Len += csize;
+    } else {
+      if (n == max) {
+        EXTENT *bigger = ReallocatePool (max * sizeof (EXTENT), 2 * max * sizeof (EXTENT), e);
+
+        if (bigger == NULL) {
+          FreePool (e);
+          return NULL;
         }
+
+        e    = bigger;
+        max *= 2;
       }
 
-      if (mSrcCount >= MAX_SOURCES) {
+      e[n].Logical = *total;
+      e[n].Dev     = dev;
+      e[n].Len     = csize;
+      n++;
+    }
+
+    *total += csize;
+    c       = exfat_next (fs, c);
+  }
+
+  if (e != NULL && len != 0) {
+    if (*total < len) {                    /* chain shorter than the file */
+      FreePool (e);
+      return NULL;
+    }
+
+    e[n - 1].Len -= *total - len;          /* last cluster is partly used */
+    *total        = len;
+  }
+
+  *count = n;
+  return e;
+}
+
+static void
+exfat_add_iso (EXFAT *fs, CONST CHAR16 *name, UINT32 first, UINT64 len, BOOLEAN nofat)
+{
+  HDISK  *d = &mSrc[mSrcCount];
+  UINT32  n;
+  UINT64  total;
+
+  ZeroMem (d, sizeof (*d));
+  d->Ext = exfat_extents (fs, first, len, nofat, &n, &total);
+  if (d->Ext == NULL) {
+    return;
+  }
+
+  d->NExt      = n;
+  d->Bio       = fs->Part.Bio;
+  d->BlockSize = fs->Part.BlockSize;
+  d->Base      = fs->Part.Base;
+  d->Size      = len;
+  d->Bounce    = AllocatePages (EFI_SIZE_TO_PAGES (BOUNCE_SIZE));
+  UnicodeSPrint (d->Name, sizeof (d->Name), L"%s (%lu MB, USB)", name, DivU64x32 (len, 1024 * 1024));
+  if (d->Bounce != NULL && is_iso (d)) {
+    mSrcCount++;
+    return;
+  }
+
+  if (d->Bounce != NULL) {
+    FreePages (d->Bounce, EFI_SIZE_TO_PAGES (BOUNCE_SIZE));
+  }
+
+  FreePool (d->Ext);
+  ZeroMem (d, sizeof (*d));
+}
+
+static void
+exfat_scan_dir (EXFAT *fs, UINT32 first, UINT64 len, BOOLEAN nofat, UINTN depth)
+{
+  EXTENT  *e;
+  UINT32  n, i;
+  UINT64  total, off;
+  UINT8   *dir;
+  HDISK   view;
+
+  e = exfat_extents (fs, first, len, nofat, &n, &total);
+  if (e == NULL || total == 0 || total > SIZE_4MB) {
+    if (e != NULL) {
+      FreePool (e);
+    }
+
+    return;
+  }
+
+  dir = AllocatePool ((UINTN)total);
+  if (dir == NULL) {
+    FreePool (e);
+    return;
+  }
+
+  view      = fs->Part;
+  view.Ext  = e;
+  view.NExt = n;
+  view.Size = total;
+  if (host_disk_read (&view, 0, dir, (uint32_t)total)) {
+    FreePool (dir);
+    FreePool (e);
+    return;
+  }
+
+  for (off = 0; off + 32 <= total && mSrcCount < MAX_SOURCES; off += 32) {
+    UINT8   *ent = dir + off;
+    UINT8   sec, attr, flags, nlen;
+    UINT32  clus;
+    UINT64  size;
+    CHAR16  name[256];
+    UINTN   k = 0;
+
+    if (ent[0] == 0x00) {
+      break;                               /* end of directory */
+    }
+
+    if (ent[0] != 0x85) {
+      continue;                            /* not an in-use file entry */
+    }
+
+    sec  = ent[1];
+    attr = ent[4];
+    if (sec < 2 || off + 32 * (UINT64)(sec + 1) > total || dir[off + 32] != 0xC0) {
+      continue;
+    }
+
+    flags = dir[off + 32 + 1];
+    nlen  = dir[off + 32 + 3];
+    clus  = *(UINT32 *)(dir + off + 32 + 20);
+    size  = *(UINT64 *)(dir + off + 32 + 24);
+    for (i = 2; i <= sec && k < nlen; i++) {
+      UINT8  *ne = dir + off + 32 * (UINT64)i;
+      UINTN  j;
+
+      if (ne[0] != 0xC1) {
         break;
+      }
+
+      for (j = 0; j < 15 && k < nlen; j++) {
+        name[k++] = *(UINT16 *)(ne + 2 + 2 * j);
       }
     }
+
+    name[k] = 0;
+    off    += 32 * (UINT64)sec;            /* skip the secondary entries */
+    if (k == 0 || name[0] == L'.' || name[0] == L'$') {
+      continue;
+    }
+
+    if (attr & 0x10) {
+      if (depth < 3 && StrCmp (name, L"System Volume Information") != 0) {
+        exfat_scan_dir (fs, clus, size, (flags & 2) != 0, depth + 1);
+      }
+    } else if (k >= 5 && ends_with_iso (name + k - 4) && size >= 64 * 1024) {
+      exfat_add_iso (fs, name, clus, size, (flags & 2) != 0);
+    }
+  }
+
+  FreePool (dir);
+  FreePool (e);
+}
+
+static void
+scan_exfat (void)
+{
+  EFI_HANDLE            *h;
+  UINTN                 n, i;
+  EFI_BLOCK_IO_PROTOCOL *b;
+  EXFAT                 *fs;
+  UINT8                 *bs;
+
+  if (EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiBlockIoProtocolGuid, NULL, &n, &h))) {
+    return;
+  }
+
+  fs = AllocateZeroPool (sizeof (*fs));
+  bs = AllocatePool (512);
+  for (i = 0; fs != NULL && bs != NULL && i < n && mSrcCount < MAX_SOURCES; i++) {
+    UINT8 sshift, cshift;
+
+    if (EFI_ERROR (gBS->HandleProtocol (h[i], &gEfiBlockIoProtocolGuid, (VOID **)&b)) ||
+        !b->Media->MediaPresent) {
+      continue;
+    }
+
+    ZeroMem (fs, sizeof (*fs));
+    fs->Part.Bio       = b;
+    fs->Part.BlockSize = b->Media->BlockSize;
+    fs->Part.Size      = MultU64x32 (b->Media->LastBlock + 1, b->Media->BlockSize);
+    fs->Part.Bounce    = AllocatePages (EFI_SIZE_TO_PAGES (BOUNCE_SIZE));
+    fs->FatPageOff     = (UINT64)-1;
+    if (fs->Part.Bounce == NULL) {
+      continue;
+    }
+
+    if (host_disk_read (&fs->Part, 0, bs, 512) == 0 && CompareMem (bs + 3, "EXFAT   ", 8) == 0) {
+      sshift = bs[0x6C];
+      cshift = bs[0x6D];
+      if (sshift >= 9 && sshift <= 12 && sshift + cshift <= 25) {
+        fs->ClusShift    = sshift + cshift;
+        fs->FatOff       = (UINT64)*(UINT32 *)(bs + 0x50) << sshift;
+        fs->HeapOff      = (UINT64)*(UINT32 *)(bs + 0x58) << sshift;
+        fs->ClusterCount = *(UINT32 *)(bs + 0x5C);
+        host_log ("x64e: exFAT volume found, looking for ISOs\n");
+        exfat_scan_dir (fs, *(UINT32 *)(bs + 0x60), 0, FALSE, 0);
+      }
+    }
+
+    FreePages (fs->Part.Bounce, EFI_SIZE_TO_PAGES (BOUNCE_SIZE));
+  }
+
+  if (fs != NULL) {
+    FreePool (fs);
+  }
+
+  if (bs != NULL) {
+    FreePool (bs);
   }
 
   FreePool (h);
@@ -507,7 +892,7 @@ static UINT8   *mTxBuf[TX_SLOTS];
 static BOOLEAN mTxBusy[TX_SLOTS];
 static uint64_t mBurstUntil;
 static uint64_t mTxFrames;
-static CHAR16  mNetName[80] = L"none - plug in a phone with USB tethering on, or a USB Ethernet adapter";
+static CHAR16  mNetName[400] = L"none - plug in a phone with USB tethering on, or a USB Ethernet adapter";
 
 static void
 net_recycle (void)
@@ -529,6 +914,46 @@ net_recycle (void)
   }
 }
 
+/*
+ * No network adapter: list what is on the USB bus (vendor:product and the
+ * interface class), so a phone that the network drivers do not take is
+ * easy to tell from a phone that is not there at all.
+ */
+static void
+usb_net_diag (void)
+{
+  EFI_HANDLE                    *h;
+  UINTN                         n, i, len;
+  EFI_USB_IO_PROTOCOL           *io;
+  EFI_USB_DEVICE_DESCRIPTOR     dd;
+  EFI_USB_INTERFACE_DESCRIPTOR  id;
+
+  if (EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiUsbIoProtocolGuid, NULL, &n, &h))) {
+    UnicodeSPrint (mNetName, sizeof (mNetName), L"none - no USB devices seen");
+    return;
+  }
+
+  UnicodeSPrint (mNetName, sizeof (mNetName), L"none - USB:");
+  for (i = 0; i < n; i++) {
+    if (EFI_ERROR (gBS->HandleProtocol (h[i], &gEfiUsbIoProtocolGuid, (VOID **)&io)) ||
+        EFI_ERROR (io->UsbGetDeviceDescriptor (io, &dd)) ||
+        EFI_ERROR (io->UsbGetInterfaceDescriptor (io, &id))) {
+      continue;
+    }
+
+    len = StrLen (mNetName);
+    if (len + 24 >= sizeof (mNetName) / sizeof (CHAR16)) {
+      break;
+    }
+
+    UnicodeSPrint (mNetName + len, sizeof (mNetName) - len * sizeof (CHAR16), L" %04x:%04x/%02x%02x%02x",
+                   dd.IdVendor, dd.IdProduct, id.InterfaceClass, id.InterfaceSubClass, id.InterfaceProtocol);
+  }
+
+  host_log ("x64e: no network adapter; %s\n", "USB interfaces listed in the menu");
+  FreePool (h);
+}
+
 static int
 net_open (uint8_t mac[6])
 {
@@ -537,6 +962,7 @@ net_open (uint8_t mac[6])
   EFI_SIMPLE_NETWORK_PROTOCOL *snp;
 
   if (EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleNetworkProtocolGuid, NULL, &n, &h))) {
+    usb_net_diag ();
     return -1;
   }
 
@@ -586,6 +1012,7 @@ net_open (uint8_t mac[6])
 
   FreePool (h);
   if (mSnp == NULL) {
+    usb_net_diag ();
     return -1;
   }
 
@@ -1049,6 +1476,7 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   read_config (ImageHandle);
   scan_block_devices ();
   scan_iso_files ();
+  scan_exfat ();
   find_disk_file ();
   if (!mHdPresent) {
     find_sd_free_space (ImageHandle);
@@ -1062,8 +1490,8 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
 
   if (mSrcCount == 0 && !mHdLinux) {
     Print (L"\n  x64 Engine: no x86-64 ISO found.\n\n"
-           L"  Write an ISO to a USB drive (balenaEtcher) or copy the .iso file\n"
-           L"  to the root of a FAT drive, then try again.\n\n  Press any key.\n");
+           L"  Write an ISO to a USB drive (balenaEtcher), or copy the .iso file\n"
+           L"  to a FAT32 or exFAT drive (Ventoy works too), then try again.\n\n  Press any key.\n");
     gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &i);
     return EFI_NOT_FOUND;
   }
