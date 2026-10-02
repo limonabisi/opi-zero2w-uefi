@@ -226,6 +226,12 @@ host_net_send (const void *frame, uint32_t len)
   return sendto (net_fd, frame, len, 0, (struct sockaddr *)&net_peer, sizeof (net_peer)) == (ssize_t)len ? 0 : -1;
 }
 
+void
+host_perf (uint64_t out[2])
+{
+  out[0] = out[1] = 0;
+}
+
 int
 host_net_recv (void *frame, uint32_t max)
 {

@@ -534,12 +534,29 @@ machine_run (machine_t *m)
         uc_x64e_shadow_stats (m->uc, sh);
         if (sh[0] || sh[1]) {
           host_log ("\n[x64e] shadow: %llu fills, %llu slow (%llu #PF, %llu io, %llu code), %llu wprot, %llu drops,"
-                    " %llu large inv, %llu tables, %llu rmap\n",
+                    " %llu large inv, %llu tables, %llu shared\n",
                     (unsigned long long)sh[0], (unsigned long long)sh[1], (unsigned long long)sh[6],
                     (unsigned long long)sh[7], (unsigned long long)sh[8], (unsigned long long)sh[2],
                     (unsigned long long)sh[3], (unsigned long long)sh[9], (unsigned long long)sh[4],
                     (unsigned long long)sh[5]);
         }
+      }
+      {
+        static uint64_t ptr[4], pf[2], pt;
+        uint64_t        tr[4], f[2], span = now - pt;
+
+        uc_x64e_perf (m->uc, tr);
+        host_perf (f);
+        if (pt != 0 && span != 0) {
+          host_log ("\n[x64e] time: %llu%% MMU faults (%llu), %llu%% translating (%llu blocks), %llu code cache flushes\n",
+                    (unsigned long long)((f[1] - pf[1]) * 100 / span), (unsigned long long)(f[0] - pf[0]),
+                    (unsigned long long)((tr[1] - ptr[1]) * 100 / span), (unsigned long long)(tr[0] - ptr[0]),
+                    (unsigned long long)tr[2]);
+        }
+
+        memcpy (ptr, tr, sizeof (ptr));
+        memcpy (pf, f, sizeof (pf));
+        pt = now;
       }
       host_log ("\n[x64e] %llus: %llu runs, %llu io, %llu irqs, idle %llu%%, rip %llx\n",
                 (unsigned long long)(now / 1000000000ULL),

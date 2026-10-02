@@ -891,6 +891,7 @@ scan_exfat (void)
 static UINT8   *mTxBuf[TX_SLOTS];
 static BOOLEAN mTxBusy[TX_SLOTS];
 static uint64_t mBurstUntil;
+static uint64_t mEmptyCost = 1000000ULL;      /* what a poll that finds nothing costs, ns */
 static uint64_t mTxFrames;
 static CHAR16  mNetName[400] = L"none - plug in a phone with USB tethering on, or a USB Ethernet adapter";
 
@@ -1027,6 +1028,15 @@ net_open (uint8_t mac[6])
   return 0;
 }
 
+/* time to leave between polls while traffic is flowing */
+static uint64_t
+net_gap (void)
+{
+  uint64_t gap = mEmptyCost * 3;
+
+  return gap < 2000000ULL ? 2000000ULL : gap > 20000000ULL ? 20000000ULL : gap;
+}
+
 int
 host_net_send (const void *frame, uint32_t len)
 {
@@ -1047,8 +1057,8 @@ host_net_send (const void *frame, uint32_t len)
       mTxBusy[i]   = TRUE;
       mTxFrames++;
       mBurstUntil  = host_now_ns () + 300000000ULL;   /* an answer is likely: look often */
-      if (mNextPoll > host_now_ns () + 2000000ULL) {
-        mNextPoll = host_now_ns () + 2000000ULL;
+      if (mNextPoll > host_now_ns () + net_gap ()) {
+        mNextPoll = host_now_ns () + net_gap ();
       }
       return 0;
     }
@@ -1091,11 +1101,14 @@ host_net_recv (void *frame, uint32_t max)
     }
 
     /*
-     * An empty poll costs a USB bulk-in timeout (a few ms), so poll often
-     * only while traffic is flowing and every 50 ms when the link is quiet.
+     * An empty poll costs a USB bulk-in timeout (a few ms) during which the
+     * x86 CPU stands still. While traffic flows, leave three times that cost
+     * between polls (the adapter queues what arrives meanwhile); when the
+     * link is quiet, poll every 50 ms.
      */
     if (EFI_ERROR (st) || len == 0) {
-      mNextPoll = end + (end < mBurstUntil ? 2000000ULL : 50000000ULL);
+      mEmptyCost = (mEmptyCost * 7 + (end - now)) / 8;
+      mNextPoll  = end + (end < mBurstUntil ? net_gap () : 50000000ULL);
       return 0;
     }
 
@@ -1275,8 +1288,12 @@ flush_disks (void)
  * Optional \EFI\X64ENGINE\X64E.CFG next to the engine, "key=value" lines:
  *   shadow=0   no shadow MMU (all guest accesses through the softmmu)
  *   el1=0      stay at EL2 (implies shadow=0)
+ *   aslr=1     leave address space randomization on in the x86 system
+ *              (off by default: with it every new process runs the same
+ *              programs at new addresses, and all their code has to be
+ *              translated again)
  */
-static int mCfgShadow = 1, mCfgEl1 = 1;
+static int mCfgShadow = 1, mCfgEl1 = 1, mCfgAslr = 0;
 
 static void
 read_config (EFI_HANDLE ImageHandle)
@@ -1304,12 +1321,14 @@ read_config (EFI_HANDLE ImageHandle)
         mCfgShadow = buf[i + 7] == '1';
       } else if (strncmp (buf + i, "el1=", 4) == 0) {
         mCfgEl1 = buf[i + 4] == '1';
+      } else if (strncmp (buf + i, "aslr=", 5) == 0) {
+        mCfgAslr = buf[i + 5] == '1';
       }
     }
   }
 
   f->Close (f);
-  host_log ("x64e: X64E.CFG: shadow=%d el1=%d\n", mCfgShadow, mCfgEl1);
+  host_log ("x64e: X64E.CFG: shadow=%d el1=%d aslr=%d\n", mCfgShadow, mCfgEl1, mCfgAslr);
 }
 
 /* ------------------------------------------------------- shadow MMU */
@@ -1329,12 +1348,24 @@ x64e_slowpath_entry (uint64_t host_pc)
   uc_x64e_slowpath (mShadowUc, host_pc);
 }
 
+static uint64_t mFaultCount, mFaultNs;
+
+void
+host_perf (uint64_t out[2])
+{
+  out[0] = mFaultCount;
+  out[1] = mFaultNs;
+}
+
 STATIC VOID EFIAPI
 X64eSyncHandler (IN EFI_EXCEPTION_TYPE Type, IN OUT EFI_SYSTEM_CONTEXT Ctx)
 {
-  EFI_SYSTEM_CONTEXT_AARCH64 *c = Ctx.SystemContextAArch64;
+  EFI_SYSTEM_CONTEXT_AARCH64 *c  = Ctx.SystemContextAArch64;
+  uint64_t                   t0 = host_now_ns ();
   int                        r  = mShadowUc != NULL ? uc_x64e_dabt (mShadowUc, c->FAR, c->ESR, c->ELR) : -1;
 
+  mFaultCount++;
+  mFaultNs += host_now_ns () - t0;
   if (r == 0) {
     return;
   }
@@ -1590,7 +1621,9 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
     }
   }
 
-  if (iso_boot (&m, vol, &bl.e[ent], "console=ttyS0,115200 console=tty0 loglevel=6 nolapic noapic")) {
+  if (iso_boot (&m, vol, &bl.e[ent],
+                mCfgAslr ? "console=ttyS0,115200 console=tty0 loglevel=6 nolapic noapic"
+                         : "console=ttyS0,115200 console=tty0 loglevel=6 nolapic noapic norandmaps")) {
     Print (L"  Could not load the kernel. Press any key.\n");
     gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &i);
     return EFI_LOAD_ERROR;

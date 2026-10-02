@@ -1,8 +1,8 @@
 diff --git a/include/uc_priv.h b/include/uc_priv.h
-index ad26c9e..f2fe0b3 100644
+index ad26c9e..c227362 100644
 --- a/include/uc_priv.h
 +++ b/include/uc_priv.h
-@@ -402,6 +402,18 @@ struct uc_struct {
+@@ -402,6 +402,20 @@ struct uc_struct {
      FlatView *empty_view; // Static function variable moved from flatviews_init
      uc_cb_is_native_t is_native;
      uc_cb_call_native_t call_native;
@@ -17,15 +17,17 @@ index ad26c9e..f2fe0b3 100644
 +    void *x64e_pcid;
 +    void *x64e_shadow;
 +    bool x64e_nopcid;
++    uint64_t x64e_tr_n, x64e_tr_ticks, x64e_tbflush;   /* translation statistics */
++    bool x64e_knong;        /* code ran from a non-global upper-half page since the last full flush */
 +    bool reset_requested;       // triple fault
  };
  
  // Metadata stub for the variable-size cpu context used with uc_context_*()
 diff --git a/include/unicorn/unicorn.h b/include/unicorn/unicorn.h
-index 4e7ed8e..e5e7992 100644
+index 4e7ed8e..0d45398 100644
 --- a/include/unicorn/unicorn.h
 +++ b/include/unicorn/unicorn.h
-@@ -1260,6 +1260,42 @@ uc_err uc_get_code_gen_buf(uc_engine *uc,
+@@ -1260,6 +1260,46 @@ uc_err uc_get_code_gen_buf(uc_engine *uc,
  UNICORN_EXPORT
  uc_err uc_get_shared(uc_engine *uc, uc_shared **shared);
  
@@ -62,6 +64,10 @@ index 4e7ed8e..e5e7992 100644
 +void uc_x64e_slowpath(uc_engine *uc, uint64_t host_pc);
 +UNICORN_EXPORT
 +void uc_x64e_shadow_stats(uc_engine *uc, uint64_t out[10]);
++
++/* translation statistics: blocks translated, ns spent translating, cache flushes */
++UNICORN_EXPORT
++void uc_x64e_perf(uc_engine *uc, uint64_t out[4]);
 +UNICORN_EXPORT
 +void uc_x86_kick(uc_engine *uc);
 +
@@ -120,7 +126,7 @@ index 4012ba7..a79666f 100644
          // Unicorn: call registered invalid instruction callbacks
          catched = false;
 diff --git a/qemu/accel/tcg/cputlb.c b/qemu/accel/tcg/cputlb.c
-index 5f50995..fd0c44c 100644
+index 5f50995..dbe0e0c 100644
 --- a/qemu/accel/tcg/cputlb.c
 +++ b/qemu/accel/tcg/cputlb.c
 @@ -30,6 +30,7 @@
@@ -430,7 +436,35 @@ index 5f50995..fd0c44c 100644
  
      all_dirty = env_tlb(env)->c.dirty;
      to_clean = asked & all_dirty;
-@@ -427,6 +700,7 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
+@@ -300,7 +573,26 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
+         tlb_flush_one_mmuidx_locked(env, mmu_idx, now);
+     }
+ 
+-    cpu_tb_jmp_cache_clear(cpu);
++    if (xst && xst->in_switch && !cpu->uc->x64e_knong && cpu->tb_jmp_cache) {
++        /*
++         * A CR3 write: global pages stay, so the blocks of the upper half
++         * (the kernel, all on global pages) are still right.
++         */
++        unsigned int i;
++
++        for (i = 0; i < TB_JMP_CACHE_SIZE; i++) {
++            TranslationBlock *tb = cpu->tb_jmp_cache[i];
++
++            if (tb && !((tb->pc >> 47) & 1)) {
++                cpu->tb_jmp_cache[i] = NULL;
++            }
++        }
++    } else {
++        cpu_tb_jmp_cache_clear(cpu);
++        if (!xst || !xst->in_switch) {
++            cpu->uc->x64e_knong = false;
++        }
++    }
+ 
+     if (to_clean == ALL_MMUIDX_BITS) {
+         env_tlb(env)->c.full_flush_count = env_tlb(env)->c.full_flush_count + 1;
+@@ -427,6 +719,7 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
  {
      CPUArchState *env = cpu->env_ptr;
      int mmu_idx;
@@ -438,7 +472,7 @@ index 5f50995..fd0c44c 100644
  
      for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
          if ((idxmap >> mmu_idx) & 1) {
-@@ -435,6 +709,7 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
+@@ -435,6 +728,7 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
      }
  
      tb_flush_jmp_cache(cpu, addr);
@@ -446,7 +480,7 @@ index 5f50995..fd0c44c 100644
  }
  
  /**
-@@ -616,6 +891,19 @@ void tlb_protect_code(struct uc_struct *uc, ram_addr_t ram_addr)
+@@ -616,6 +910,19 @@ void tlb_protect_code(struct uc_struct *uc, ram_addr_t ram_addr)
  {
      cpu_physical_memory_test_and_clear_dirty(ram_addr, TARGET_PAGE_SIZE,
                                               DIRTY_MEMORY_CODE);
@@ -466,7 +500,7 @@ index 5f50995..fd0c44c 100644
  }
  
  /* update the TLB so that writes in physical page 'phys_addr' are no longer
-@@ -1191,15 +1479,25 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
+@@ -1191,15 +1498,25 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
  {
      ram_addr_t ram_addr = mem_vaddr + iotlbentry->addr;
  
@@ -495,7 +529,7 @@ index 5f50995..fd0c44c 100644
      }
  
      /* For exec pages, this is cleared in tb_gen_code. */
-@@ -1473,10 +1771,11 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
+@@ -1473,10 +1790,11 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
      bool handled;
      HOOK_FOREACH_VAR_DECLARE;
      struct uc_struct *uc = env->uc;
@@ -509,7 +543,7 @@ index 5f50995..fd0c44c 100644
          handled = false;
          // if there is already an unhandled eror, skip callbacks.
          if (uc->invalid_error == UC_ERR_OK) {
-@@ -2047,10 +2346,10 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
+@@ -2047,10 +2365,10 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
      }
  
      // Load the latest memory mapping.
@@ -522,7 +556,7 @@ index 5f50995..fd0c44c 100644
          handled = false;
          HOOK_FOREACH(uc, hook, UC_HOOK_MEM_WRITE_UNMAPPED) {
              if (hook->to_delete)
-@@ -2482,3 +2781,649 @@ uint64_t cpu_ldq_code(CPUArchState *env, abi_ptr addr)
+@@ -2482,3 +2800,758 @@ uint64_t cpu_ldq_code(CPUArchState *env, abi_ptr addr)
      TCGMemOpIdx oi = make_memop_idx(MO_TEQ, cpu_mmu_index(env, true));
      return full_ldq_code(env, addr, oi, 0);
  }
@@ -568,6 +602,15 @@ index 5f50995..fd0c44c 100644
 +
 +#define X64E_ROOTS        X64E_SLOTS        /* one tree per address space */
 +#define X64E_FOLD         0xffff000000000000ULL
++/*
++ * The x86 upper half (the kernel) is the same in every address space as
++ * long as its pages are global: its shadow tables are built once, in a
++ * pseudo-tree, and every address space's tree links to them. A CR3 write
++ * then only drops the lower half, exactly what it flushes on a real CPU.
++ * The first non-global page seen in the upper half turns sharing off
++ * (until the next full flush).
++ */
++#define X64E_KKEY         X64E_ROOTS
 +#define X64E_RMAP_BUCKETS 65536
 +#define X64E_RMAP_MAX     (256 * 1024)
 +#define X64E_PA_MASK      0x0000fffffffff000ULL
@@ -593,8 +636,10 @@ index 5f50995..fd0c44c 100644
 +    uint32_t npages;
 +    uint32_t *free;
 +    uint32_t nfree;
-+    uint64_t *root[X64E_ROOTS];
-+    uint32_t gen[X64E_ROOTS];
++    uint64_t *root[X64E_ROOTS + 1];             /* [X64E_KKEY]: the shared upper half */
++    uint32_t gen[X64E_ROOTS + 1];
++    bool kshare;                                /* guest-global upper half shared by all trees */
++    uint64_t kfills, kflips;
 +    int cur;
 +    uint64_t ttbr0;
 +    unsigned t0sz;
@@ -610,6 +655,7 @@ index 5f50995..fd0c44c 100644
 +bool x86_x64e_probe(CPUState *cs, vaddr addr, MMUAccessType access_type, int mmu_idx);
 +extern target_ulong x64e_probe_page_size;
 +extern bool x64e_probe_user;
++extern bool x64e_probe_global;
 +bool x64e_page_has_code(struct uc_struct *uc, ram_addr_t ram);
 +
 +bool x64e_shadow_enabled(struct uc_struct *uc)
@@ -640,6 +686,11 @@ index 5f50995..fd0c44c 100644
 +    uint64_t arg = (uint64_t)asid << 48;
 +
 +    __asm__ volatile ("dsb ishst; tlbi aside1, %0; dsb nsh; isb" :: "r" (arg) : "memory");
++}
++
++static inline void x64e_tlbi_all(void)
++{
++    __asm__ volatile ("tlbi vmalle1; dsb nsh; isb" ::: "memory");
 +}
 +
 +static inline void x64e_set_ttbr1(uint64_t *root, unsigned asid)
@@ -675,19 +726,53 @@ index 5f50995..fd0c44c 100644
 +    sh->free[sh->nfree++] = (uint32_t)(((uint8_t *)t - sh->pool) / 4096);
 +}
 +
++/* a new tree: with sharing on, its upper half is the shared one */
++static uint64_t *x64e_new_root(X64eShadow *sh)
++{
++    uint64_t *t = x64e_alloc_table(sh);
++
++    if (t && sh->kshare && sh->root[X64E_KKEY]) {
++        memcpy(t + 256, sh->root[X64E_KKEY] + 256, 256 * sizeof(uint64_t));
++    }
++    return t;
++}
++
 +static void x64e_drop_root(X64eShadow *sh, int key)
 +{
-+    if (!sh->root[key]) {
++    uint64_t *t = sh->root[key];
++    int i;
++
++    if (!t) {
 +        return;
 +    }
-+    x64e_free_table(sh, sh->root[key], 0);
++    if (key != X64E_KKEY && sh->kshare) {
++        /* the upper half belongs to the shared tree */
++        for (i = 0; i < 256; i++) {
++            if ((t[i] & 3) == 3) {
++                x64e_free_table(sh, (uint64_t *)(uintptr_t)(t[i] & X64E_PA_MASK), 1);
++            }
++        }
++        sh->free[sh->nfree++] = (uint32_t)(((uint8_t *)t - sh->pool) / 4096);
++    } else {
++        x64e_free_table(sh, t, 0);
++    }
 +    sh->root[key] = NULL;
 +    sh->gen[key]++;
 +    sh->drops++;
++    if (key == X64E_KKEY) {
++        /* nothing may link to the freed tables */
++        for (i = 0; i < X64E_ROOTS; i++) {
++            if (sh->root[i]) {
++                memset(sh->root[i] + 256, 0, 256 * sizeof(uint64_t));
++            }
++        }
++        x64e_tlbi_all();
++        return;
++    }
 +    x64e_tlbi_asid(key + 1);
 +    if (sh->cur == key) {
 +        /* never leave TTBR1 on freed tables */
-+        sh->root[key] = x64e_alloc_table(sh);
++        sh->root[key] = x64e_new_root(sh);
 +        x64e_set_ttbr1(sh->root[key], key + 1);
 +    }
 +}
@@ -703,10 +788,12 @@ index 5f50995..fd0c44c 100644
 +{
 +    int k;
 +
++    x64e_drop_root(sh, X64E_KKEY);              /* first: unlinks it everywhere */
 +    for (k = 0; k < X64E_ROOTS; k++) {
 +        x64e_drop_root(sh, k);
 +    }
 +    x64e_rmap_reset(sh);
++    x64e_tlbi_all();
 +}
 +
 +static uint64_t *x64e_pte_mark(X64eShadow *sh, int key, uint64_t va, bool create, uint64_t mark1, uint64_t mark2)
@@ -848,7 +935,11 @@ index 5f50995..fd0c44c 100644
 +
 +            if (pte && (*pte & 3) == 3 && !(*pte & (2ULL << 6)) && (*pte & X64E_PA_MASK) == e->pa) {
 +                *pte |= (2ULL << 6);            /* read-only */
-+                x64e_tlbi_va_asid(e->va, e->root + 1);
++                if (e->root == X64E_KKEY) {
++                    x64e_tlbi_va_all(e->va);
++                } else {
++                    x64e_tlbi_va_asid(e->va, e->root + 1);
++                }
 +                sh->wprot++;
 +            }
 +        }
@@ -878,9 +969,9 @@ index 5f50995..fd0c44c 100644
 +    if (key == sh->cur) {
 +        return;
 +    }
-+    if (!sh->root[key] && !(sh->root[key] = x64e_alloc_table(sh))) {
++    if (!sh->root[key] && !(sh->root[key] = x64e_new_root(sh))) {
 +        x64e_drop_all(sh);
-+        sh->root[key] = x64e_alloc_table(sh);
++        sh->root[key] = x64e_new_root(sh);
 +    }
 +    sh->cur = key;
 +    x64e_set_ttbr1(sh->root[key], key + 1);
@@ -893,6 +984,7 @@ index 5f50995..fd0c44c 100644
 +
 +    if (sh && sh->on) {
 +        x64e_drop_all(sh);
++        sh->kshare = true;                      /* a clean start: share again */
 +    }
 +}
 +
@@ -914,9 +1006,12 @@ index 5f50995..fd0c44c 100644
 +    if (!sh || !sh->on) {
 +        return;
 +    }
-+    for (k = 0; k < X64E_ROOTS; k++) {
++    for (k = 0; k <= X64E_ROOTS; k++) {
 +        uint64_t *t = sh->root[k], *e1, *e2, *l2, *l3;
 +
++        if (sh->kshare && (va & (1ULL << 47)) && k != X64E_KKEY) {
++            continue;                           /* shared: once, through its own tree */
++        }
 +        if (!t || (t[(va >> 39) & 511] & 3) != 3) {
 +            continue;
 +        }
@@ -929,7 +1024,11 @@ index 5f50995..fd0c44c 100644
 +        if (*e1 & X64E_SW_1G) {                 /* a guest 1 GB page: all of it */
 +            x64e_free_table(sh, l2, 2);
 +            *e1 = 0;
-+            x64e_tlbi_asid(k + 1);
++            if (k == X64E_KKEY) {
++                x64e_tlbi_all();
++            } else {
++                x64e_tlbi_asid(k + 1);
++            }
 +            sh->large_inv++;
 +            continue;
 +        }
@@ -941,7 +1040,11 @@ index 5f50995..fd0c44c 100644
 +        if (*e2 & X64E_SW_2M) {                 /* a guest 2 MB page: all of it */
 +            x64e_free_table(sh, l3, 3);
 +            *e2 = 0;
-+            x64e_tlbi_asid(k + 1);
++            if (k == X64E_KKEY) {
++                x64e_tlbi_all();
++            } else {
++                x64e_tlbi_asid(k + 1);
++            }
 +            sh->large_inv++;
 +            continue;
 +        }
@@ -960,7 +1063,7 @@ index 5f50995..fd0c44c 100644
 +    CPUTLBEntry *e;
 +    target_ulong rd, wr, ps;
 +    uint64_t host, ram, old, pte, *p, m1, m2;
-+    bool can_w, code, user;
++    bool can_w, code, user, shared = false;
 +
 +    if (key < 0 || !x86_x64e_probe(cpu, gva, is_write ? MMU_DATA_STORE : MMU_DATA_LOAD, idx)) {
 +        sh->slow_fault++;
@@ -968,6 +1071,15 @@ index 5f50995..fd0c44c 100644
 +    }
 +    ps = x64e_probe_page_size;
 +    user = x64e_probe_user;
++    if (gva & (1ULL << 47)) {
++        if (sh->kshare && !x64e_probe_global) {
++            /* a non-global page in the upper half: every tree on its own */
++            x64e_drop_all(sh);
++            sh->kshare = false;
++            sh->kflips++;
++        }
++        shared = sh->kshare;
++    }
 +    index = tlb_index(env, idx, gva);
 +    e = tlb_entry(env, idx, gva);
 +    rd = e->addr_read;
@@ -1022,18 +1134,48 @@ index 5f50995..fd0c44c 100644
 +
 +    m1 = ps >= (1ULL << 30) ? X64E_SW_1G : 0;
 +    m2 = ps >= (1ULL << 21) && ps < (1ULL << 30) ? X64E_SW_2M : 0;
-+    p = x64e_pte_mark(sh, key, va, true, m1, m2);
-+    if (!p) {
-+        x64e_drop_all(sh);
++    if (shared) {
++        int l0 = (va >> 39) & 511, k;
++
++        pte &= ~(1ULL << 11);                   /* global: every ASID */
++        key = X64E_KKEY;
++        if (!sh->root[key]) {
++            sh->root[key] = x64e_alloc_table(sh);
++        }
 +        p = x64e_pte_mark(sh, key, va, true, m1, m2);
-+    }
-+    if (!p) {
-+        return 1;
++        if (!p) {
++            x64e_drop_all(sh);
++            sh->root[key] = x64e_alloc_table(sh);
++            p = x64e_pte_mark(sh, key, va, true, m1, m2);
++        }
++        if (!p) {
++            return 1;
++        }
++        /* every tree sees the shared tables */
++        for (k = 0; k < X64E_ROOTS; k++) {
++            if (sh->root[k] && sh->root[k][l0] != sh->root[key][l0]) {
++                sh->root[k][l0] = sh->root[key][l0];
++            }
++        }
++        sh->kfills++;
++    } else {
++        p = x64e_pte_mark(sh, key, va, true, m1, m2);
++        if (!p) {
++            x64e_drop_all(sh);
++            p = x64e_pte_mark(sh, key, va, true, m1, m2);
++        }
++        if (!p) {
++            return 1;
++        }
 +    }
 +    old = *p;
 +    *p = pte;
 +    if ((old & 3) == 3) {
-+        x64e_tlbi_va_asid(va, key + 1);
++        if (shared) {
++            x64e_tlbi_va_all(va);
++        } else {
++            x64e_tlbi_va_asid(va, key + 1);
++        }
 +    } else {
 +        __asm__ volatile ("dsb ishst; isb" ::: "memory");
 +    }
@@ -1066,6 +1208,7 @@ index 5f50995..fd0c44c 100644
 +    sh->rhead = g_new0(uint32_t, X64E_RMAP_BUCKETS);
 +    x64e_rmap_reset(sh);
 +    sh->cur = -1;
++    sh->kshare = true;
 +    sh->attr_blk = (uint64_t)-1;
 +
 +    __asm__ volatile ("mrs %0, ttbr0_el1" : "=r" (sh->ttbr0));
@@ -1149,7 +1292,7 @@ index 5f50995..fd0c44c 100644
 +    out[2] = sh->wprot;
 +    out[3] = sh->drops;
 +    out[4] = sh->npages - sh->nfree;
-+    out[5] = sh->rnext;
++    out[5] = sh->kfills;
 +}
 +
 +#else /* !X64E_SHADOW_POSSIBLE */
@@ -1185,7 +1328,7 @@ index 0846662..24ce236 100644
  }
  
 diff --git a/qemu/accel/tcg/translate-all.c b/qemu/accel/tcg/translate-all.c
-index fef9c11..33d1b94 100644
+index fef9c11..4f897dd 100644
 --- a/qemu/accel/tcg/translate-all.c
 +++ b/qemu/accel/tcg/translate-all.c
 @@ -796,6 +796,10 @@ static void page_lock_pair(struct uc_struct *uc, PageDesc **ret_p1, tb_page_addr
@@ -1199,7 +1342,15 @@ index fef9c11..33d1b94 100644
  
  static inline size_t size_code_gen_buffer(size_t tb_size)
  {
-@@ -1299,6 +1303,7 @@ static void do_tb_flush(CPUState *cpu, run_on_cpu_data tb_flush_count)
+@@ -1276,6 +1280,7 @@ static gboolean tb_host_size_iter(gpointer key, gpointer value, gpointer data)
+ /* flush all the translation blocks */
+ static void do_tb_flush(CPUState *cpu, run_on_cpu_data tb_flush_count)
+ {
++    cpu->uc->x64e_tbflush++;
+     mmap_lock();
+     /* If it is already been done on request of another CPU,
+      * just retry.
+@@ -1299,6 +1304,7 @@ static void do_tb_flush(CPUState *cpu, run_on_cpu_data tb_flush_count)
      }
  #else
      cpu_tb_jmp_cache_clear(cpu);
@@ -1207,7 +1358,7 @@ index fef9c11..33d1b94 100644
  #endif
  
      qht_reset_size(cpu->uc, &cpu->uc->tcg_ctx->tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
-@@ -1457,6 +1462,7 @@ static void do_tb_phys_invalidate(TCGContext *tcg_ctx, TranslationBlock *tb, boo
+@@ -1457,6 +1463,7 @@ static void do_tb_phys_invalidate(TCGContext *tcg_ctx, TranslationBlock *tb, boo
      if (cpu->tb_jmp_cache[h] == tb) {
          cpu->tb_jmp_cache[h] = NULL;
      }
@@ -1215,7 +1366,65 @@ index fef9c11..33d1b94 100644
  
      /* suppress this TB from the two jump lists */
      tb_remove_from_jmp_list(tb, 0);
-@@ -1689,6 +1695,14 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
+@@ -1620,9 +1627,57 @@ tb_link_page(struct uc_struct *uc, TranslationBlock *tb, tb_page_addr_t phys_pc,
+ }
+ 
+ /* Called with mmap_lock held for user mode emulation.  */
++static inline uint64_t x64e_ticks(void)
++{
++#if defined(__aarch64__)
++    uint64_t v;
++
++    __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (v));
++    return v;
++#else
++    return 0;
++#endif
++}
++
++static TranslationBlock *x64e_tb_gen_code1(CPUState *cpu,
++                              target_ulong pc, target_ulong cs_base,
++                              uint32_t flags, int cflags);
++
++/* x64 engine: count the blocks translated and the time that takes */
+ TranslationBlock *tb_gen_code(CPUState *cpu,
+                               target_ulong pc, target_ulong cs_base,
+                               uint32_t flags, int cflags)
++{
++    struct uc_struct *uc = cpu->uc;
++    uint64_t t0 = x64e_ticks();
++    TranslationBlock *tb;
++
++    uc->x64e_tr_n++;
++    tb = x64e_tb_gen_code1(cpu, pc, cs_base, flags, cflags);
++    uc->x64e_tr_ticks += x64e_ticks() - t0;
++    return tb;
++}
++
++UNICORN_EXPORT
++void uc_x64e_perf(uc_engine *uc, uint64_t out[4])
++{
++    uint64_t frq = 1;
++
++#if defined(__aarch64__)
++    __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (frq));
++    if (!frq) {
++        frq = 1;
++    }
++#endif
++    out[0] = uc->x64e_tr_n;
++    out[1] = uc->x64e_tr_ticks / frq * 1000000000ULL + uc->x64e_tr_ticks % frq * 1000000000ULL / frq;
++    out[2] = uc->x64e_tbflush;
++    out[3] = 0;
++}
++
++static TranslationBlock *x64e_tb_gen_code1(CPUState *cpu,
++                              target_ulong pc, target_ulong cs_base,
++                              uint32_t flags, int cflags)
+ {
+ #ifdef TARGET_ARM
+     struct uc_struct *uc = cpu->uc;
+@@ -1689,6 +1744,14 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
      tcg_func_start(tcg_ctx);
  
      tcg_ctx->cpu = env_cpu(env);
@@ -1230,7 +1439,7 @@ index fef9c11..33d1b94 100644
      UC_TRACE_START(UC_TRACE_TB_TRANS);
      gen_intermediate_code(cpu, tb, max_insns);
      UC_TRACE_END(UC_TRACE_TB_TRANS, "[uc] translate tb 0x%" PRIx64 ": ", tb->pc);
-@@ -1772,9 +1786,15 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
+@@ -1772,9 +1835,15 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
          phys_page2 = get_page_addr_code(env, virt_page2);
      }
  
@@ -1249,7 +1458,7 @@ index fef9c11..33d1b94 100644
  
      /*
       * No explicit memory barrier is required -- tb_link_page() makes the
-@@ -1948,7 +1968,7 @@ void tb_invalidate_phys_range(struct uc_struct *uc, ram_addr_t start, ram_addr_t
+@@ -1948,7 +2017,7 @@ void tb_invalidate_phys_range(struct uc_struct *uc, ram_addr_t start, ram_addr_t
   *
   * Call with all @pages in the range [@start, @start + len[ locked.
   */
@@ -1258,7 +1467,7 @@ index fef9c11..33d1b94 100644
                                    tb_page_addr_t start, int len,
                                    uintptr_t retaddr)
  {
-@@ -1958,7 +1978,7 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
+@@ -1958,7 +2027,7 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
  
      p = page_find(uc, start >> TARGET_PAGE_BITS);
      if (!p) {
@@ -1267,7 +1476,7 @@ index fef9c11..33d1b94 100644
      }
  
      assert_page_locked(p);
-@@ -1980,6 +2000,17 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
+@@ -1980,6 +2049,17 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
          tb_invalidate_phys_page_range__locked(uc, pages, p, start, start + len,
                                                retaddr);
      }
@@ -1381,10 +1590,10 @@ index 6860afd..94f8d72 100644
  }
  
 diff --git a/qemu/target/i386/excp_helper.c b/qemu/target/i386/excp_helper.c
-index f658c81..5a8ea05 100644
+index f658c81..6a98050 100644
 --- a/qemu/target/i386/excp_helper.c
 +++ b/qemu/target/i386/excp_helper.c
-@@ -345,6 +345,11 @@ static hwaddr get_hphys(CPUState *cs, hwaddr gphys, MMUAccessType access_type,
+@@ -345,6 +345,13 @@ static hwaddr get_hphys(CPUState *cs, hwaddr gphys, MMUAccessType access_type,
   * 0  = nothing more to do
   * 1  = generate PF fault
   */
@@ -1392,19 +1601,22 @@ index f658c81..5a8ea05 100644
 +target_ulong x64e_probe_page_size;
 +/* ... and whether it is a user page */
 +bool x64e_probe_user;
++/* ... and a global one (PTE.G with CR4.PGE) */
++bool x64e_probe_global;
 +
  static int handle_mmu_fault(CPUState *cs, vaddr addr, int size,
                              int is_write1, int mmu_idx)
  {
-@@ -568,6 +573,7 @@ do_check_protect_pse36:
+@@ -568,6 +575,8 @@ do_check_protect_pse36:
          goto do_fault_rsvd;
      }
      ptep ^= PG_NX_MASK;
 +    x64e_probe_user = (ptep & PG_USER_MASK) != 0;
++    x64e_probe_global = (pte & PG_GLOBAL_MASK) && (env->cr[4] & CR4_PGE_MASK);
  
      /* can the page can be put in the TLB?  prot will tell us */
      if (is_user && !(ptep & PG_USER_MASK)) {
-@@ -644,10 +650,14 @@ do_check_protect_pse36:
+@@ -644,10 +653,14 @@ do_check_protect_pse36:
      assert(prot & (1 << is_write1));
  
      // Unicorn: indentity map guest virtual address to host virtual address
@@ -1421,7 +1633,7 @@ index f658c81..5a8ea05 100644
      tlb_set_page_with_attrs(cs, vaddr, paddr, cpu_get_mem_attrs(env),
                              prot, mmu_idx, page_size);
      return 0;
-@@ -677,6 +687,28 @@ do_check_protect_pse36:
+@@ -677,6 +690,28 @@ do_check_protect_pse36:
      return 1;
  }
  
@@ -1450,11 +1662,20 @@ index f658c81..5a8ea05 100644
  bool x86_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                        MMUAccessType access_type, int mmu_idx,
                        bool probe, uintptr_t retaddr)
+@@ -691,5 +726,8 @@ bool x86_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
+         raise_exception_err_ra(env, cs->exception_index,
+                                env->error_code, retaddr);
+     }
++    if (access_type == MMU_INST_FETCH && ((addr >> 47) & 1) && !x64e_probe_global) {
++        env->uc->x64e_knong = true;
++    }
+     return true;
+ }
 diff --git a/qemu/target/i386/helper.c b/qemu/target/i386/helper.c
-index 8a3540e..a3808f8 100644
+index 8a3540e..6d1fca3 100644
 --- a/qemu/target/i386/helper.c
 +++ b/qemu/target/i386/helper.c
-@@ -146,6 +146,20 @@ void cpu_x86_update_cr0(CPUX86State *env, uint32_t new_cr0)
+@@ -146,10 +146,31 @@ void cpu_x86_update_cr0(CPUX86State *env, uint32_t new_cr0)
     the PDPT */
  void cpu_x86_update_cr3(CPUX86State *env, target_ulong new_cr3)
  {
@@ -1475,7 +1696,18 @@ index 8a3540e..a3808f8 100644
      env->cr[3] = new_cr3;
      if (env->cr[0] & CR0_PG_MASK) {
          qemu_log_mask(CPU_LOG_MMU,
-@@ -162,7 +176,7 @@ void cpu_x86_update_cr4(CPUX86State *env, uint32_t new_cr4)
+                         "CR3 update: CR3=" TARGET_FMT_lx "\n", new_cr3);
++#ifdef TARGET_X86_64
++        if ((env->hflags & HF_LMA_MASK) && env->uc->x86_system_mode) {
++            /* x64 engine: a CR3 write keeps global pages (the kernel's) */
++            tlb_x64e_set_pcid(env_cpu(env), 0, true);
++            return;
++        }
++#endif
+         tlb_flush(env_cpu(env));
+     }
+ }
+@@ -162,7 +183,7 @@ void cpu_x86_update_cr4(CPUX86State *env, uint32_t new_cr4)
      printf("CR4 update: %08x -> %08x\n", (uint32_t)env->cr[4], new_cr4);
  #endif
      if ((new_cr4 ^ env->cr[4]) &

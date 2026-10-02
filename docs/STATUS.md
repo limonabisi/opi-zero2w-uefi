@@ -7,7 +7,7 @@
 State: Active
 Codename: opizero2w
 SoC: Allwinner H618 (4x Cortex-A53, 1 GB LPDDR4)
-Version: 0.12.1-h618
+Version: 0.12.2-h618
 
 Contributors: limonabisi
 

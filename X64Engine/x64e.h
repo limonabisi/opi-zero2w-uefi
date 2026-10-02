@@ -153,6 +153,7 @@ typedef struct {
 /* host network: raw Ethernet frames; recv returns the length, 0 if none */
 int  host_net_send (const void *frame, uint32_t len);
 int  host_net_recv (void *frame, uint32_t max);
+void host_perf (uint64_t out[2]);     /* MMU faults handled, ns spent on them */
 void vnet_init (machine_t *m, vnet_t *v, int slot, int irq, const uint8_t mac[6]);
 void vnet_poll (machine_t *m, vnet_t *v);
 int  vnet_io_read (machine_t *m, vnet_t *v, uint16_t off, int size, uint32_t *val);

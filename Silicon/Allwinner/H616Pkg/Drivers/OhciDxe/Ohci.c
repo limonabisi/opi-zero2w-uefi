@@ -872,8 +872,16 @@ OhciBulkTransfer(
     }
 
     if ((TimeOut != 0) && (TimeCount > (UINTN)TimeOut * 20)) {
-      EdResult.ErrorCode = TD_TOBE_PROCESSED;
-      break;
+      //
+      // Out of time. If packets of this transfer are already going through,
+      // let it finish (up to 200 ms more): cancelling now would lose them.
+      //
+      if (((Done == 0) && ((Td == NULL) || (Td == EmptyTd) || (Td->CurrBufferPointer == Td->DataBuffer))) ||
+          (TimeCount > (UINTN)TimeOut * 20 + 4000))
+      {
+        EdResult.ErrorCode = TD_TOBE_PROCESSED;
+        break;
+      }
     }
 
     gBS->Stall (50);

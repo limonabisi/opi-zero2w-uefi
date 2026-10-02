@@ -61,8 +61,21 @@ index cc8e076..d0fd28e 100644
    {
      return TRUE;
    }
+diff --git a/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndis.h b/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndis.h
+index 04366e4..00019bd 100644
+--- a/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndis.h
++++ b/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndis.h
+@@ -43,7 +43,7 @@ typedef struct {
+ 
+ #define USB_RNDIS_DRIVER_VERSION       1
+ #define USB_TX_ETHERNET_BULK_TIMEOUT   3000
+-#define USB_RX_ETHERNET_BULK_TIMEOUT   3
++#define USB_RX_ETHERNET_BULK_TIMEOUT   1
+ #define USB_ETHERNET_TRANSFER_TIMEOUT  200
+ 
+ #define LAN_BULKIN_CMD_CONTROL      1
 diff --git a/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndisFunction.c b/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndisFunction.c
-index 8723a82..27cde82 100644
+index 8723a82..2ad6bb3 100644
 --- a/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndisFunction.c
 +++ b/MdeModulePkg/Bus/Usb/UsbNetwork/UsbRndis/UsbRndisFunction.c
 @@ -907,7 +907,50 @@ SetUsbRndisPacketFilter (
@@ -127,3 +140,154 @@ index 8723a82..27cde82 100644
    return Status;
  }
  
+@@ -1315,6 +1361,7 @@ RndisUndiReceive (
+   VOID                    *Buffer;
+   PACKET_LIST             *HeadPacket;
+   PACKET_LIST             *PacketList;
++  UINTN                   Round;
+ 
+   // Check if there is any outstanding packet to receive
+   // The buffer allocated has a linked List followed by the packet.
+@@ -1323,76 +1370,83 @@ RndisUndiReceive (
+   Buffer         = NULL;
+   HeadPacket     = NULL;
+ 
+-  while (1) {
+-    Buffer = AllocateZeroPool (sizeof (PACKET_LIST) + sizeof (REMOTE_NDIS_PACKET_MSG) + UsbRndisDevice->MaxTransferSize);
+-    if (Buffer == NULL) {
+-      return EFI_OUT_OF_RESOURCES;
+-    }
++  //
++  // Hand out the packets that are already queued first. Only when nothing
++  // is queued read the device, once: every read that finds no data costs a
++  // bulk-in timeout, and that must not be paid for every received packet.
++  //
++  for (Round = 0; Round < 2; Round++) {
++    if (IsListEmpty (&UsbRndisDevice->ReceivePacketList)) {
++      Buffer = AllocatePool (sizeof (PACKET_LIST) + sizeof (REMOTE_NDIS_PACKET_MSG) + UsbRndisDevice->MaxTransferSize);
++      if (Buffer == NULL) {
++        return EFI_OUT_OF_RESOURCES;
++      }
+ 
+-    RndisPacketMsg                = (REMOTE_NDIS_PACKET_MSG *)(sizeof (PACKET_LIST) + (UINT8 *)Buffer);
+-    PacketList                    = (PACKET_LIST *)Buffer;
+-    PacketList->PacketStartBuffer = (UINT8 *)Buffer + sizeof (PACKET_LIST);
+-    // Save the original address for freeing it up
+-    PacketList->OrgBuffer = (UINT8 *)Buffer;
+-    TransferLength        = UsbRndisDevice->MaxTransferSize;
+-
+-    Status = RndisReceiveDataMsg (
+-               UsbRndisDevice,
+-               (REMOTE_NDIS_MSG_HEADER *)RndisPacketMsg,
+-               &TransferLength
+-               );
+-
+-    if (EFI_ERROR (Status) || (TransferLength == 0)) {
+-      FreePool (Buffer);
+-      break;
+-    }
++      RndisPacketMsg                = (REMOTE_NDIS_PACKET_MSG *)(sizeof (PACKET_LIST) + (UINT8 *)Buffer);
++      PacketList                    = (PACKET_LIST *)Buffer;
++      PacketList->PacketStartBuffer = (UINT8 *)Buffer + sizeof (PACKET_LIST);
++      // Save the original address for freeing it up
++      PacketList->OrgBuffer = (UINT8 *)Buffer;
++      TransferLength        = UsbRndisDevice->MaxTransferSize;
++      ZeroMem (RndisPacketMsg, sizeof (REMOTE_NDIS_PACKET_MSG));
++
++      Status = RndisReceiveDataMsg (
++                 UsbRndisDevice,
++                 (REMOTE_NDIS_MSG_HEADER *)RndisPacketMsg,
++                 &TransferLength
++                 );
++
++      if (EFI_ERROR (Status) || (TransferLength == 0)) {
++        FreePool (Buffer);
++        return EFI_NOT_FOUND;
++      }
+ 
+-    // Collect all the RNDIS packet in Linked list.
+-    if ((RndisPacketMsg->MessageType == RNDIS_PACKET_MSG) &&
+-        (RndisPacketMsg->DataOffset == sizeof (REMOTE_NDIS_PACKET_MSG) - RNDIS_RESERVED_BYTE_LENGTH) &&
+-        (TransferLength >= RndisPacketMsg->MessageLength))
+-    {
+-      // Insert Packet
+-      PacketList->RemainingLength = TransferLength;
+-      InsertTailList (&UsbRndisDevice->ReceivePacketList, Buffer);
+-    } else {
+-      FreePool (Buffer);
++      if ((RndisPacketMsg->MessageType == RNDIS_PACKET_MSG) &&
++          (RndisPacketMsg->DataOffset == sizeof (REMOTE_NDIS_PACKET_MSG) - RNDIS_RESERVED_BYTE_LENGTH) &&
++          (TransferLength >= RndisPacketMsg->MessageLength))
++      {
++        PacketList->RemainingLength = TransferLength;
++        InsertTailList (&UsbRndisDevice->ReceivePacketList, Buffer);
++      } else {
++        FreePool (Buffer);
++        return EFI_NOT_FOUND;
++      }
+     }
+-  }
+-
+-  while (!IsListEmpty (&UsbRndisDevice->ReceivePacketList)) {
+-    HeadPacket = (PACKET_LIST *)GetFirstNode (&UsbRndisDevice->ReceivePacketList);
+ 
+-    RndisPacketMsg = (REMOTE_NDIS_PACKET_MSG *)(UINT8 *)HeadPacket->PacketStartBuffer;
++    while (!IsListEmpty (&UsbRndisDevice->ReceivePacketList)) {
++      HeadPacket = (PACKET_LIST *)GetFirstNode (&UsbRndisDevice->ReceivePacketList);
+ 
+-    PrintRndisMsg ((REMOTE_NDIS_MSG_HEADER *)RndisPacketMsg);
++      RndisPacketMsg = (REMOTE_NDIS_PACKET_MSG *)(UINT8 *)HeadPacket->PacketStartBuffer;
+ 
+-    // Check whether the packet is valid RNDIS packet.
+-    if ((HeadPacket->RemainingLength > sizeof (REMOTE_NDIS_PACKET_MSG)) && (RndisPacketMsg->MessageType == RNDIS_PACKET_MSG) &&
+-        (RndisPacketMsg->DataOffset == (sizeof (REMOTE_NDIS_PACKET_MSG) - RNDIS_RESERVED_BYTE_LENGTH)) &&
+-        (HeadPacket->RemainingLength >= RndisPacketMsg->MessageLength))
+-    {
+-      if (*DataLength >= RndisPacketMsg->DataLength) {
+-        CopyMem (
+-          BulkInData,
+-          (UINT8 *)RndisPacketMsg + (RndisPacketMsg->DataOffset + RNDIS_RESERVED_BYTE_LENGTH),
+-          RndisPacketMsg->DataLength
+-          );
++      // Check whether the packet is valid RNDIS packet.
++      if ((HeadPacket->RemainingLength > sizeof (REMOTE_NDIS_PACKET_MSG)) && (RndisPacketMsg->MessageType == RNDIS_PACKET_MSG) &&
++          (RndisPacketMsg->DataOffset == (sizeof (REMOTE_NDIS_PACKET_MSG) - RNDIS_RESERVED_BYTE_LENGTH)) &&
++          (HeadPacket->RemainingLength >= RndisPacketMsg->MessageLength) &&
++          (RndisPacketMsg->MessageLength >= sizeof (REMOTE_NDIS_PACKET_MSG)) &&
++          (RndisPacketMsg->DataLength <= RndisPacketMsg->MessageLength - sizeof (REMOTE_NDIS_PACKET_MSG)))
++      {
++        if (*DataLength >= RndisPacketMsg->DataLength) {
++          CopyMem (
++            BulkInData,
++            (UINT8 *)RndisPacketMsg + (RndisPacketMsg->DataOffset + RNDIS_RESERVED_BYTE_LENGTH),
++            RndisPacketMsg->DataLength
++            );
+ 
+-        *DataLength =  RndisPacketMsg->DataLength;
++          *DataLength =  RndisPacketMsg->DataLength;
+ 
+-        HeadPacket->RemainingLength   = HeadPacket->RemainingLength - RndisPacketMsg->MessageLength;
+-        HeadPacket->PacketStartBuffer = (UINT8 *)RndisPacketMsg + RndisPacketMsg->MessageLength;
++          HeadPacket->RemainingLength   = HeadPacket->RemainingLength - RndisPacketMsg->MessageLength;
++          HeadPacket->PacketStartBuffer = (UINT8 *)RndisPacketMsg + RndisPacketMsg->MessageLength;
+ 
+-        return EFI_SUCCESS;
+-      } else {
+-        *DataLength = RndisPacketMsg->DataLength;
+-        return EFI_BUFFER_TOO_SMALL;
++          return EFI_SUCCESS;
++        } else {
++          *DataLength = RndisPacketMsg->DataLength;
++          return EFI_BUFFER_TOO_SMALL;
++        }
+       }
+-    }
+ 
+-    RemoveEntryList (&HeadPacket->PacketList);
+-    FreePool ((PACKET_LIST *)HeadPacket->OrgBuffer);
++      RemoveEntryList (&HeadPacket->PacketList);
++      FreePool ((PACKET_LIST *)HeadPacket->OrgBuffer);
++    }
+   }
+ 
+   return EFI_NOT_FOUND;
