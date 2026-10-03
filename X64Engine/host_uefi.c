@@ -1641,20 +1641,30 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   gBS->SetWatchdogTimer (0, 0, 0, NULL);
   Print (L"\n  x64 Engine: looking for ISOs, the hard disk and the network...\n");
 
+  /* each step is named on the UART, so that a log shows where a problem is */
+  host_log ("x64e: step: settings\n");
   read_config (ImageHandle);
+  host_log ("x64e: step: drives\n");
   scan_block_devices ();
+  host_log ("x64e: step: ISO files (FAT)\n");
   scan_iso_files ();
+  host_log ("x64e: step: ISO files (exFAT)\n");
   scan_exfat ();
+  host_log ("x64e: step: disk image file\n");
   find_disk_file ();
   if (!mHdPresent) {
+    host_log ("x64e: step: microSD free space\n");
     find_sd_free_space (ImageHandle);
   }
 
   if (mHdPresent) {
+    host_log ("x64e: step: installed Linux on the hard disk\n");
     mHdLinux = disk_find_linux (&mHd, mHd.Size, &mHdFs) ? TRUE : FALSE;
   }
 
+  host_log ("x64e: step: network\n");
   have_net = net_open (mac) == 0;
+  host_log ("x64e: step: menu (%u ISOs)\n", (unsigned)mSrcCount);
 
   if (mSrcCount == 0 && !mHdPresent) {
     Print (L"\n  x64 Engine: no x86-64 ISO found.\n\n"
