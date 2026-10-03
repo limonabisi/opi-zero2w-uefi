@@ -1,0 +1,21 @@
+diff --git a/vgasrc/bochsvga.c b/vgasrc/bochsvga.c
+index fd5e586..281eabe 100644
+--- a/vgasrc/bochsvga.c
++++ b/vgasrc/bochsvga.c
+@@ -362,6 +362,7 @@ bochsvga_setup(void)
+     u16 en = dispi_read(VBE_DISPI_INDEX_ENABLE);
+     dispi_write(VBE_DISPI_INDEX_ENABLE, en | VBE_DISPI_GETCAPS);
+     u16 max_xres = dispi_read(VBE_DISPI_INDEX_XRES);
++    u16 max_yres = dispi_read(VBE_DISPI_INDEX_YRES);
+     u16 max_bpp = dispi_read(VBE_DISPI_INDEX_BPP);
+     dispi_write(VBE_DISPI_INDEX_ENABLE, en);
+     struct generic_svga_mode *m = svga_modes;
+@@ -373,7 +374,7 @@ bochsvga_setup(void)
+         u32 mem = (height * DIV_ROUND_UP(width * vga_bpp(&m->info), 8)
+                    * stdvga_vram_ratio(&m->info));
+ 
+-        if (width > max_xres || depth > max_bpp || mem > totalmem) {
++        if (width > max_xres || height > max_yres || depth > max_bpp || mem > totalmem) {
+             dprintf(1, "Removing mode %x\n", GET_GLOBAL(m->mode));
+             SET_VGA(m->mode, 0xffff);
+         }

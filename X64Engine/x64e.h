@@ -88,15 +88,22 @@ void     uart_poll_input (machine_t *m);
 
 /* --------------------------------------------------------- i8042 ---- */
 typedef struct {
-  uint8_t q[256];
+  uint8_t q[256];                       /* keyboard */
   uint8_t head, tail;
-  uint8_t out, obf, ccb, pending, kbd_param, scanning, last_was_cmd, irq_level;
+  uint8_t mq[256];                      /* PS/2 mouse (PC BIOS machine) */
+  uint8_t mhead, mtail;
+  uint8_t cq[8];                        /* controller replies */
+  uint8_t chead, ctail;
+  uint8_t out, obf, src, ccb, pending, kbd_param, scanning, last_was_cmd, irq_level, aux_irq_level, outport;
+  uint8_t mouse_on, mouse_param, mouse_rate, mouse_res, mouse_id, mouse_seq[3], mouse_buttons, mouse_wrap, mouse_scale;
+  int     mouse_dx, mouse_dy, mouse_dz;
 } i8042_t;
 
 void     i8042_init (machine_t *m);
 uint32_t i8042_io_read (machine_t *m, uint16_t port);
 void     i8042_io_write (machine_t *m, uint16_t port, uint8_t val);
 void     i8042_key (machine_t *m, uint8_t code);
+void     i8042_mouse (machine_t *m, int dx, int dy, int dz, int buttons);
 
 enum { KEY_UP = 0x100, KEY_DOWN, KEY_RIGHT, KEY_LEFT, KEY_HOME, KEY_END, KEY_INSERT,
        KEY_DELETE, KEY_PGUP, KEY_PGDN, KEY_F1 };
@@ -104,11 +111,15 @@ void     kbd_type_char (machine_t *m, int c);
 void     kbd_type_key (machine_t *m, int key);
 
 /* ------------------------------------------------------------ pci ---- */
-typedef struct {
+typedef struct pci_dev {
   int      slot;
+  int      fn;
   uint8_t  cfg[256];
   uint32_t bar_size[6];
   uint8_t  bar_io[6];
+  /* called after a configuration write (reg: first byte written) */
+  void   (*changed)(struct machine *m, struct pci_dev *d, unsigned reg);
+  void    *opaque;
 } pci_dev_t;
 
 void     pci_init (machine_t *m);
@@ -116,6 +127,7 @@ void     pci_register (machine_t *m, pci_dev_t *d);
 void     pci_init_config (pci_dev_t *d, uint16_t vendor, uint16_t device, uint32_t class_rev,
                           uint16_t sub_vendor, uint16_t sub_device);
 uint32_t pci_bar_io (pci_dev_t *d, int b);
+uint32_t pci_bar_mem (pci_dev_t *d, int b);     /* 0 if memory decoding is off */
 uint32_t pci_io_read (machine_t *m, uint16_t port, int size);
 void     pci_io_write (machine_t *m, uint16_t port, int size, uint32_t val);
 
@@ -223,7 +235,7 @@ struct machine {
   int         reset_request;
   int         quit;
   int         console_to_kbd;     /* host console input goes to the PS/2 keyboard */
-  pci_dev_t  *pci[8];
+  pci_dev_t  *pci[16];
   int         npci;
   uint32_t    pci_addr;
   vblk_t      vblk[2];
@@ -240,6 +252,10 @@ struct machine {
   int         overlay;                /* F11: counters drawn on the screen */
   char        ov_line[4][200];
   uint64_t    kernel_end;             /* end of the memory the kernel image needs */
+  /* PC BIOS machine (pc.c): chipset, IDE, VGA, APICs, RTC */
+  int         pc_bios;
+  int         pic_out;                /* 8259 INT output */
+  void       *pc, *ide, *vga, *apic, *rtc;
   /* statistics */
   uint64_t    io_exits, irqs, runs, idle_ns;
 };
@@ -251,6 +267,7 @@ int linux_boot_setup (machine_t *m, const uint8_t *kernel, size_t ksize,
                       const uint8_t *initrd, size_t isize, const char *cmdline);
 
 int  machine_init (machine_t *m, uint64_t ram_mb);
+int  machine_init_pc (machine_t *m, uint64_t ram_mb);   /* PC with a BIOS (pc.h) */
 void machine_dump (machine_t *m, const char *why);
 int  machine_add_disk (machine_t *m, void *disk, uint64_t size, int readonly);
 int  machine_add_net (machine_t *m, const uint8_t mac[6]);

@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "x64e.h"
+#include "pc.h"
 
 static uint32_t
 io_in (uc_engine *uc, uint32_t port, int size, void *opaque)
@@ -11,6 +12,10 @@ io_in (uc_engine *uc, uint32_t port, int size, void *opaque)
 
   (void)uc;
   m->io_exits++;
+  if (m->pc_bios && pc_io_read (m, (uint16_t)port, size, &v)) {
+    return size == 1 ? (v & 0xff) : size == 2 ? (v & 0xffff) : v;
+  }
+
   switch (port) {
     case 0x20: case 0x21: case 0xa0: case 0xa1: case 0x4d0: case 0x4d1:
       v = pic_io_read (m, (uint16_t)port);
@@ -70,8 +75,11 @@ io_out (uc_engine *uc, uint32_t port, int size, uint32_t val, void *opaque)
   machine_t *m = opaque;
 
   (void)uc;
-  (void)size;
   m->io_exits++;
+  if (m->pc_bios && pc_io_write (m, (uint16_t)port, size, val)) {
+    return;
+  }
+
   switch (port) {
     case 0x20: case 0x21: case 0xa0: case 0xa1: case 0x4d0: case 0x4d1:
       pic_io_write (m, (uint16_t)port, (uint8_t)val);
@@ -311,13 +319,14 @@ machine_dump (machine_t *m, const char *why)
   host_log ("\n");
 }
 
-int
-machine_init (machine_t *m, uint64_t ram_mb)
+static int
+machine_init1 (machine_t *m, uint64_t ram_mb, int pc)
 {
   uc_err     err;
   uc_hook    h;
 
   memset (m, 0, sizeof (*m));
+  m->pc_bios = pc;
   err = uc_open (UC_ARCH_X86, UC_MODE_32, &m->uc);
   if (err) {
     host_log ("x64e: uc_open: %s\n", uc_strerror (err));
@@ -335,8 +344,17 @@ machine_init (machine_t *m, uint64_t ram_mb)
     return -1;
   }
 
-  /* RAM below 3 GiB only for now: 0 - ram_size */
-  err = uc_mem_map_ptr (m->uc, 0, m->ram_size, UC_PROT_ALL, m->ram);
+  /* RAM below 3 GiB only for now: 0 - ram_size; the PC BIOS machine has the
+     VGA window (0xA0000 - 0xBFFFF) in it */
+  if (pc) {
+    err = uc_mem_map_ptr (m->uc, 0, 0xa0000, UC_PROT_ALL, m->ram);
+    if (!err) {
+      err = uc_mem_map_ptr (m->uc, 0xc0000, m->ram_size - 0xc0000, UC_PROT_ALL, m->ram + 0xc0000);
+    }
+  } else {
+    err = uc_mem_map_ptr (m->uc, 0, m->ram_size, UC_PROT_ALL, m->ram);
+  }
+
   if (err) {
     host_log ("x64e: mem map: %s\n", uc_strerror (err));
     return -1;
@@ -364,12 +382,25 @@ machine_init (machine_t *m, uint64_t ram_mb)
   return 0;
 }
 
+int
+machine_init (machine_t *m, uint64_t ram_mb)
+{
+  return machine_init1 (m, ram_mb, 0);
+}
+
+int
+machine_init_pc (machine_t *m, uint64_t ram_mb)
+{
+  return machine_init1 (m, ram_mb, 1);
+}
+
 /* 32 bpp BGRX framebuffer shared with the host (GOP memory on the board) */
 int
 machine_set_fb (machine_t *m, void *fb, uint32_t w, uint32_t h, uint32_t stride)
 {
   uint64_t size = ((uint64_t)stride * h + 0xffff) & ~0xffffULL;
-  uc_err   err  = uc_mem_map_ptr (m->uc, FB_BASE, size, UC_PROT_READ | UC_PROT_WRITE, fb);
+  /* the PC BIOS machine draws its VGA into it instead of handing it to the guest */
+  uc_err   err  = m->pc_bios ? UC_ERR_OK : uc_mem_map_ptr (m->uc, FB_BASE, size, UC_PROT_READ | UC_PROT_WRITE, fb);
 
   if (err) {
     host_log ("x64e: framebuffer map: %s\n", uc_strerror (err));
@@ -509,6 +540,15 @@ machine_run (machine_t *m)
     uart_poll_input (m);
     host_poll_input (m);
     vnet_poll (m, &m->vnet);
+    if (m->pc_bios) {
+      pc_tick (m, now);
+      if (m->reset_request && !m->quit) {
+        host_log ("\nx64e: reset\n");
+        pc_reset (m);
+        pc = uc_x86_get_pc64 (m->uc);
+      }
+    }
+
     if (m->reset_request || m->quit) {
       host_log ("\nx64e: %s\n", m->quit ? "stopped" : "guest reset");
       return;
@@ -522,6 +562,16 @@ machine_run (machine_t *m)
     }
     if (trace && m->runs > 2000000 && m->runs < 2000010) {
       machine_dump (m, "trace");
+    }
+
+    if (m->pc_bios && uc_x86_reset_requested (m->uc)) {
+      host_log ("\nx64e: triple fault\n");
+      if (getenv ("X64E_DUMP")) {
+        machine_dump (m, "reset");
+      }
+
+      m->reset_request = 1;
+      continue;
     }
 
     if (uc_x86_reset_requested (m->uc)) {
@@ -560,6 +610,10 @@ machine_run (machine_t *m)
       }
       now  = host_now_ns ();
       next = pit_next_event (m);
+      if (m->pc_bios && pc_next_event (m) < next) {
+        next = pc_next_event (m);
+      }
+
       if (next > now + 10000000ULL) {
         next = now + 10000000ULL;
       }

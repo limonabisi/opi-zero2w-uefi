@@ -1,6 +1,6 @@
 /*
  * PCI configuration mechanism #1 (0xCF8/0xCFC) with a host bridge and the
- * virtio devices. Bus 0 only, one function per device.
+ * virtio devices. Bus 0 only.
  */
 #include <string.h>
 #include "x64e.h"
@@ -13,12 +13,12 @@ pci_find (machine_t *m, uint32_t addr)
   unsigned fn  = (addr >> 8) & 7;
   int      i;
 
-  if (bus != 0 || fn != 0) {
+  if (bus != 0) {
     return NULL;
   }
 
   for (i = 0; i < m->npci; i++) {
-    if (m->pci[i]->slot == dev) {
+    if (m->pci[i]->slot == (int)dev && m->pci[i]->fn == (int)fn) {
       return m->pci[i];
     }
   }
@@ -84,7 +84,7 @@ cfg_write (pci_dev_t *d, unsigned reg, int size, uint32_t val)
         int      sh   = 8 * ((r - 0x10) & 3);
         uint32_t nv   = (cur & ~(0xffu << sh)) | ((uint32_t)v << sh);
 
-        nv = (nv & mask) | (d->bar_io[b] ? 1 : 0);
+        nv = (nv & mask) | (d->bar_io[b] ? 1 : (cur & 0xf));
         d->cfg[0x10 + b * 4 + 0] = nv;
         d->cfg[0x10 + b * 4 + 1] = nv >> 8;
         d->cfg[0x10 + b * 4 + 2] = nv >> 16;
@@ -110,6 +110,17 @@ pci_bar_io (pci_dev_t *d, int b)
   }
 
   return cfg_read (d, 0x10 + b * 4, 4) & ~3u;
+}
+
+/* current address of memory BAR b, or 0 if disabled */
+uint32_t
+pci_bar_mem (pci_dev_t *d, int b)
+{
+  if (!(d->cfg[0x04] & 2)) {
+    return 0;
+  }
+
+  return cfg_read (d, 0x10 + b * 4, 4) & ~15u;
 }
 
 uint32_t
@@ -147,6 +158,9 @@ pci_io_write (machine_t *m, uint16_t port, int size, uint32_t val)
     d = pci_find (m, m->pci_addr);
     if (d) {
       cfg_write (d, (m->pci_addr & 0xfc) + (port & 3), size, val);
+      if (d->changed) {
+        d->changed (m, d, (m->pci_addr & 0xfc) + (port & 3));
+      }
     }
   }
 }

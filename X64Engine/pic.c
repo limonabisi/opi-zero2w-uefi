@@ -1,5 +1,6 @@
 /* Intel 8259A pair (master 0x20/0x21, slave 0xA0/0xA1), ELCR 0x4D0/0x4D1. */
 #include "x64e.h"
+#include "pc.h"
 
 static int
 prio_highest (pic_t *p, uint8_t mask)
@@ -64,6 +65,13 @@ pic_update (machine_t *m)
 
   irq   = pic_get_irq (&m->pic[0], 1);
   level = (irq >= 0);
+  if (m->pc_bios) {
+    /* the local APIC decides whether the CPU sees it */
+    m->pic_out = level;
+    cpu_irq_update (m);
+    return;
+  }
+
   if (level != m->cpu_irq_level) {
     m->cpu_irq_level = level;
     uc_x86_set_irq_line (m->uc, level);
@@ -102,6 +110,10 @@ void
 pic_set_irq (machine_t *m, int irq, int level)
 {
   pic_set_irq1 (&m->pic[irq >> 3], irq & 7, level);
+  if (m->pc_bios) {
+    ioapic_set_irq (m, irq == 0 ? 2 : irq, level);    /* IRQ0 is wired to IO-APIC pin 2 */
+  }
+
   pic_update (m);
 }
 

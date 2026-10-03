@@ -16,6 +16,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "x64e.h"
+#include "pc.h"
 
 static uint64_t   t0;
 static uc_engine *kick_uc;
@@ -288,6 +289,79 @@ main (int argc, char **argv)
   const char      *cmd = "console=ttyS0 earlyprintk=serial nolapic noapic nokaslr";
   struct termios   tio;
   int              ram_mb = getenv ("X64E_RAM") ? atoi (getenv ("X64E_RAM")) : 512;
+
+  /* X64E_BIOS=bios.bin[,vgabios.bin]: the PC with a BIOS; X64E_HD is the IDE disk, X64E_CD the CD-ROM */
+  if (getenv ("X64E_BIOS")) {
+    char   *b = strdup (getenv ("X64E_BIOS")), *v = strchr (b, ',');
+    size_t  bs, vs = 0;
+    uint8_t *bios, *vbios = NULL;
+
+    if (v) {
+      *v++ = 0;
+    }
+
+    clock_gettime (CLOCK_MONOTONIC, &ts);
+    t0   = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+    bios = load_file (b, &bs);
+    if (v) {
+      vbios = load_file (v, &vs);
+    }
+
+    if (machine_init_pc (&m, ram_mb)) {
+      return 1;
+    }
+
+    clock_gettime (CLOCK_REALTIME, &ts);
+    m.boot_ns = (uint64_t)ts.tv_sec * 1000000000ULL;
+    {
+      unsigned w = 1024, h = 768;
+
+      if (getenv ("X64E_FB")) {
+        sscanf (getenv ("X64E_FB"), "%ux%u", &w, &h);
+      }
+
+      machine_set_fb (&m, host_alloc ((size_t)w * h * 4 + 0x10000), w, h, w * 4);
+    }
+
+    if (pc_setup (&m, bios, bs, vbios, vs)) {
+      return 1;
+    }
+
+    if (getenv ("X64E_HD")) {
+      int fd = open (getenv ("X64E_HD"), O_RDWR);
+
+      if (fd < 0) {
+        perror (getenv ("X64E_HD"));
+        return 1;
+      }
+
+      ide_attach (&m, 0, 0, (void *)(intptr_t)fd, (uint64_t)lseek (fd, 0, SEEK_END), 0, 0);
+    }
+
+    if (getenv ("X64E_CD")) {
+      int fd = open (getenv ("X64E_CD"), O_RDONLY);
+
+      if (fd < 0) {
+        perror (getenv ("X64E_CD"));
+        return 1;
+      }
+
+      ide_attach (&m, 1, 0, (void *)(intptr_t)fd, (uint64_t)lseek (fd, 0, SEEK_END), 1, 1);
+    }
+
+    if (isatty (0)) {
+      tcgetattr (0, &tio);
+      cfmakeraw (&tio);
+      tio.c_oflag |= OPOST | ONLCR;
+      tcsetattr (0, TCSANOW, &tio);
+    }
+
+    m.console_to_kbd = 1;
+    m.overlay        = getenv ("X64E_OVERLAY") != NULL;
+    fb_machine       = &m;
+    machine_run (&m);
+    return 0;
+  }
 
   if (argc < 2 && !getenv ("X64E_ISO") && !getenv ("X64E_HD")) {
     fprintf (stderr, "usage: %s bzImage [initrd] [cmdline]\n       X64E_ISO=file.iso [X64E_ENTRY=n] %s\n", argv[0], argv[0]);
