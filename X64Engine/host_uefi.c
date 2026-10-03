@@ -5,6 +5,11 @@
  * guest framebuffer, the USB keyboard feeds the PS/2 controller, BlockIo /
  * SimpleFileSystem back the virtio disks, a 1 ms timer event kicks the CPU
  * loop. F12 leaves the machine and returns to the firmware.
+ *
+ * Two machines: Linux ISOs and installed Linux systems are started directly
+ * (kernel loaded by the engine, virtio disks); anything else - Windows -
+ * starts on the PC with a BIOS (pc.h): SeaBIOS, IDE disk and CD-ROM, VGA,
+ * USB mouse as a PS/2 mouse.
  */
 #include <Uefi.h>
 #include <Library/UefiLib.h>
@@ -25,9 +30,12 @@
 #include <Protocol/LoadedImage.h>
 #include <Protocol/DevicePath.h>
 #include <Protocol/Cpu.h>
+#include <Protocol/AbsolutePointer.h>
+#include <Protocol/SimplePointer.h>
 #include <Guid/FileInfo.h>
 
 #include "x64e.h"
+#include "pc.h"
 #include "x64e_el.h"
 
 int64_t efi_get_timer_ns (void);
@@ -176,10 +184,80 @@ host_idle_until (uint64_t deadline)
   }
 }
 
+/*
+ * USB mouse -> PS/2 mouse of the PC BIOS machine. The firmware's mouse
+ * driver gives a position inside a fixed square (AbsolutePointer); only
+ * the movement matters, so the position is put back in the middle when it
+ * nears an edge. A relative pointer (SimplePointer) is used if present.
+ */
+static EFI_ABSOLUTE_POINTER_PROTOCOL *mAbs;
+static EFI_SIMPLE_POINTER_PROTOCOL   *mRel;
+static UINT64                        mAbsX, mAbsY, mAbsZ;
+static BOOLEAN                       mAbsValid;
+static int                           mButtons;
+
+static void
+mouse_open (void)
+{
+  if (EFI_ERROR (gBS->LocateProtocol (&gEfiSimplePointerProtocolGuid, NULL, (VOID **)&mRel))) {
+    mRel = NULL;
+  }
+
+  if (mRel != NULL || EFI_ERROR (gBS->LocateProtocol (&gEfiAbsolutePointerProtocolGuid, NULL, (VOID **)&mAbs))) {
+    mAbs = NULL;
+  }
+
+  host_log ("x64e: mouse: %s\n", mRel ? "relative pointer" : mAbs ? "USB mouse" : "none");
+}
+
+static void
+mouse_poll (machine_t *m)
+{
+  if (mRel != NULL) {
+    EFI_SIMPLE_POINTER_STATE st;
+
+    if (!EFI_ERROR (mRel->GetState (mRel, &st))) {
+      INT32 rx = mRel->Mode->ResolutionX ? (INT32)mRel->Mode->ResolutionX : 1;
+      INT32 ry = mRel->Mode->ResolutionY ? (INT32)mRel->Mode->ResolutionY : 1;
+
+      mButtons = (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0);
+      i8042_mouse (m, st.RelativeMovementX / rx, -(st.RelativeMovementY / ry), 0, mButtons);
+    }
+  } else if (mAbs != NULL) {
+    EFI_ABSOLUTE_POINTER_STATE st;
+
+    if (!EFI_ERROR (mAbs->GetState (mAbs, &st))) {
+      UINT64 maxx = mAbs->Mode->AbsoluteMaxX, maxy = mAbs->Mode->AbsoluteMaxY;
+      int    b    = ((st.ActiveButtons & 1) ? 1 : 0) | ((st.ActiveButtons & 2) ? 2 : 0);
+
+      if (mAbsValid) {
+        i8042_mouse (m, (int)(INT64)(st.CurrentX - mAbsX), -(int)(INT64)(st.CurrentY - mAbsY),
+                     -(int)(INT64)(st.CurrentZ - mAbsZ), b);
+      }
+
+      mButtons  = b;
+      mAbsX     = st.CurrentX;
+      mAbsY     = st.CurrentY;
+      mAbsZ     = st.CurrentZ;
+      mAbsValid = TRUE;
+      if (maxx > 16 && maxy > 16 &&
+          (st.CurrentX < maxx / 8 || st.CurrentX > maxx - maxx / 8 ||
+           st.CurrentY < maxy / 8 || st.CurrentY > maxy - maxy / 8)) {
+        mAbs->Reset (mAbs, FALSE);       /* back to the middle */
+        mAbsValid = FALSE;
+      }
+    }
+  }
+}
+
 void
 host_poll_input (machine_t *m)
 {
   EFI_INPUT_KEY k;
+
+  if (m->pc_bios) {
+    mouse_poll (m);
+  }
 
   while (gST->ConIn->ReadKeyStroke (gST->ConIn, &k) == EFI_SUCCESS) {
     switch (k.ScanCode) {
@@ -1526,6 +1604,8 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   UINT64                       free_mb, guest_mb, reserve;
   uint8_t                      mac[6];
   BOOLEAN                      have_net;
+  BOOLEAN                      pc = FALSE;       /* start on the PC with a BIOS */
+  static CHAR16                hd_bios[160];
 
   mT0 = (uint64_t)efi_get_timer_ns ();
   gBS->SetWatchdogTimer (0, 0, 0, NULL);
@@ -1546,7 +1626,7 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
 
   have_net = net_open (mac) == 0;
 
-  if (mSrcCount == 0 && !mHdLinux) {
+  if (mSrcCount == 0 && !mHdPresent) {
     Print (L"\n  x64 Engine: no x86-64 ISO found.\n\n"
            L"  Write an ISO to a USB drive (balenaEtcher), or copy the .iso file\n"
            L"  to a FAT32 or exFAT drive (Ventoy works too), then try again.\n\n  Press any key.\n");
@@ -1555,10 +1635,20 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   }
 
   for (;;) {
+    INTN hd_linux = -1, hd_pc = -1;
+
     first = 0;
+    pc    = FALSE;
     if (mHdLinux) {
-      UnicodeSPrint (installed, sizeof (installed), L"Installed system on the hard disk");
+      UnicodeSPrint (installed, sizeof (installed), L"Installed Linux on the hard disk");
+      hd_linux       = (INTN)first;
       items[first++] = installed;
+    }
+
+    if (mHdPresent) {
+      UnicodeSPrint (hd_bios, sizeof (hd_bios), L"Hard disk, started by the PC BIOS (Windows)");
+      hd_pc          = (INTN)first;
+      items[first++] = hd_bios;
     }
 
     for (i = 0; i < mSrcCount; i++) {
@@ -1570,7 +1660,13 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
       return EFI_ABORTED;
     }
 
-    if ((UINTN)sel < first) {
+    if (sel == hd_pc) {
+      src = -1;
+      pc  = TRUE;
+      break;
+    }
+
+    if (sel == hd_linux) {
       src = -1;
       vol = &mHdFs;
     } else {
@@ -1584,17 +1680,34 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
     }
 
     if (bootcfg_scan (vol, &bl) == 0) {
+      if (src >= 0) {
+        /* not a Linux disc the engine can start itself: Windows or any
+           other system that starts from the BIOS */
+        pc = TRUE;
+        break;
+      }
+
       Print (L"\n  No boot entries found. Press any key.\n");
       gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &i);
       continue;
     }
 
-    for (i = 0; i < (UINTN)bl.count; i++) {
+    for (i = 0; i < (UINTN)bl.count && i < MAX_BOOT_ENTRIES - 1; i++) {
       UnicodeSPrint (titles[i], sizeof (titles[i]), L"%a", bl.e[i].title);
       items[i] = titles[i];
     }
 
-    ent = bl.count == 1 ? 0 : choose (L"Choose the menu entry:", items, bl.count);
+    if (src >= 0) {
+      items[i] = L"Start this disc the way a PC does (BIOS; slower, for discs that do not start above)";
+      ent      = choose (L"Choose the menu entry:", items, i + 1);
+      if (ent == (INTN)i) {
+        pc = TRUE;
+        break;
+      }
+    } else {
+      ent = bl.count == 1 ? 0 : choose (L"Choose the menu entry:", items, bl.count);
+    }
+
     if (ent >= 0) {
       break;
     }
@@ -1617,7 +1730,11 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   guest_mb = guest_mb > 1024 ? 1024 : guest_mb & ~31ULL;
   host_log ("x64e: %lu MB free, %lu MB for the x86 machine\n", free_mb, guest_mb);
   Print (L"  Memory: %lu MB free, %lu MB for the x86 machine\n", free_mb, guest_mb);
-  if (machine_init (&m, guest_mb) != 0) {
+  if (pc && guest_mb > 160) {
+    guest_mb = (guest_mb - 16) & ~15ULL;       /* video memory, BIOS */
+  }
+
+  if ((pc ? machine_init_pc (&m, guest_mb) : machine_init (&m, guest_mb)) != 0) {
     Print (L"  Not enough memory for the x86 machine. Press any key.\n");
     gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &i);
     return EFI_OUT_OF_RESOURCES;
@@ -1628,20 +1745,24 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   m.boot_ns = epoch_seconds () * 1000000000ULL;
 
   /* the hard disk is always the first disk (vda), the ISO the second */
-  if (mHdPresent) {
+  if (!pc && mHdPresent) {
     machine_add_disk (&m, &mHd, mHd.Size, 0);
     host_log ("x64e: hard disk: %s\n", mHdLinux ? "installed system found" : "empty or unknown");
   }
 
-  if (src >= 0) {
+  if (!pc && src >= 0) {
     machine_add_disk (&m, &mSrc[src], mSrc[src].Size, 1);
   }
 
-  if (have_net) {
+  if (!pc && have_net) {
     machine_add_net (&m, mac);
   }
 
-  Print (L"  Hard disk: %s\n  Network:   %s\n", mHdPresent ? mHd.Name : L"none", mNetName);
+  if (pc) {
+    Print (L"  Hard disk: %s\n  CD-ROM:    %s\n", mHdPresent ? mHd.Name : L"none", src >= 0 ? mSrc[src].Name : L"none");
+  } else {
+    Print (L"  Hard disk: %s\n  Network:   %s\n", mHdPresent ? mHd.Name : L"none", mNetName);
+  }
 
   if (!EFI_ERROR (gBS->HandleProtocol (gST->ConsoleOutHandle, &gEfiGraphicsOutputProtocolGuid, (VOID **)&gop)) ||
       !EFI_ERROR (gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&gop))) {
@@ -1653,7 +1774,30 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
     }
   }
 
-  {
+  if (pc) {
+    /*
+     * The PC with a BIOS: SeaBIOS starts the hard disk (IDE primary master)
+     * if it has a system, else the disc (IDE secondary master). A Windows
+     * disc asks for a key before it starts when the hard disk has a system.
+     */
+    if (m.fb == NULL) {
+      Print (L"  No screen. Press any key.\n");
+      gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &i);
+      return EFI_UNSUPPORTED;
+    }
+
+    r = pc_setup (&m, x64e_seabios, x64e_seabios_size, x64e_vgabios, x64e_vgabios_size);
+    if (r == 0 && mHdPresent) {
+      r = ide_attach (&m, 0, 0, &mHd, mHd.Size, 0, 0);
+    }
+
+    if (r == 0 && src >= 0) {
+      r = ide_attach (&m, 1, 0, &mSrc[src], mSrc[src].Size, 1, 1);
+    }
+
+    mouse_open ();
+    host_log ("x64e: PC BIOS machine: disk %s, CD %s\n", mHdPresent ? "yes" : "no", src >= 0 ? "yes" : "no");
+  } else {
     static char extra[160];
 
     /*
@@ -1668,7 +1812,7 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   }
 
   if (r) {
-    Print (L"  Could not load the kernel. Press any key.\n");
+    Print (pc ? L"  Could not set up the PC. Press any key.\n" : L"  Could not load the kernel. Press any key.\n");
     gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &i);
     return EFI_LOAD_ERROR;
   }

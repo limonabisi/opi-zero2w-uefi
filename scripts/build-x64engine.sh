@@ -16,6 +16,10 @@ apply() { (cd "$1" && if git apply --check "$2" 2>/dev/null; then git apply "$2"
 apply "$SRC/MultiArchUefiPkg" "$TOP/patches/multiarchuefipkg-0001-opi-zero2w.patch"
 apply "$SRC/unicorn" "$TOP/patches/unicorn-0001-cpuid-fpu-tsc.patch"
 apply "$SRC/unicorn" "$TOP/patches/unicorn-0002-x64-engine-system-mode.patch"
+apply "$SRC/unicorn" "$TOP/patches/unicorn-0003-x64-engine-pc-bios.patch"
+# The BIOS of the "PC with a BIOS" machine: SeaBIOS and SeaVGABIOS (X64Engine/bios/README.md)
+python3 "$TOP/scripts/bin2c.py" "$TOP/X64Engine/bios_blob.c" \
+  x64e_seabios "$TOP/X64Engine/bios/bios.bin" x64e_vgabios "$TOP/X64Engine/bios/vgabios.bin"
 export WORKSPACE="$TOP/build/emu-ws"
 export PACKAGES_PATH="$SRC/edk2:$SRC:$TOP"
 export GCC_AARCH64_PREFIX="${GCC_AARCH64_PREFIX:-aarch64-linux-gnu-}"

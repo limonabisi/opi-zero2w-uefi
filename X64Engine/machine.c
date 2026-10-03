@@ -162,6 +162,24 @@ parse_uint (const char *s)
   return v;
 }
 
+static uint32_t
+parse_hex (const char **s)
+{
+  uint32_t v = 0;
+
+  for (;; (*s)++) {
+    char c = **s;
+
+    if (c >= '0' && c <= '9') {
+      v = v * 16 + (uint32_t)(c - '0');
+    } else if (c >= 'a' && c <= 'f') {
+      v = v * 16 + (uint32_t)(c - 'a' + 10);
+    } else {
+      return v;
+    }
+  }
+}
+
 static uint64_t trace_ring[256];
 static unsigned trace_pos;
 
@@ -438,8 +456,8 @@ machine_init1 (machine_t *m, uint64_t ram_mb, int pc)
     const char *e = getenv ("X64E_IOLOG");
 
     io_log    = 1;
-    io_log_lo = (uint32_t)strtoul (e, (char **)&e, 16);
-    io_log_hi = *e ? (uint32_t)strtoul (e + 1, NULL, 16) : io_log_lo;
+    io_log_lo = parse_hex (&e);
+    io_log_hi = *e ? (e++, parse_hex (&e)) : io_log_lo;
   }
 
   if (getenv ("X64E_BTRACE")) {
@@ -640,9 +658,7 @@ machine_run (machine_t *m)
 
     if (m->pc_bios && uc_x86_reset_requested (m->uc)) {
       host_log ("\nx64e: triple fault\n");
-      if (getenv ("X64E_DUMP")) {
-        machine_dump (m, "reset");
-      }
+      machine_dump (m, "reset");
 
       m->reset_request = 1;
       continue;
@@ -690,15 +706,6 @@ machine_run (machine_t *m)
 
       if (next > now + 10000000ULL) {
         next = now + 10000000ULL;
-      }
-
-      if (getenv ("X64E_IDLEDBG")) {
-        static uint64_t n;
-        if ((++n % 200000) == 0) {
-          host_log ("idle: now %llu pit %llu pc %llu irq %d picout %d\n", (unsigned long long)now,
-                    (unsigned long long)pit_next_event (m), (unsigned long long)(m->pc_bios ? pc_next_event (m) : 0),
-                    m->cpu_irq_level, m->pic_out);
-        }
       }
 
       if (next > now) {

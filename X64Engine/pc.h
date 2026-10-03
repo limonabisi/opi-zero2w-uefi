@@ -17,6 +17,10 @@
 
 #define PM_BASE      0xb000        /* SeaBIOS puts the PIIX4 PM block here */
 
+/* the BIOS images (bios_blob.c, generated from X64Engine/bios/ by the build) */
+extern const unsigned char x64e_seabios[], x64e_vgabios[];
+extern const unsigned int  x64e_seabios_size, x64e_vgabios_size;
+
 /* pc.c */
 int      pc_setup (machine_t *m, const uint8_t *bios, size_t bios_size,
                    const uint8_t *vgabios, size_t vgabios_size);

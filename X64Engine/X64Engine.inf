@@ -28,6 +28,13 @@
   bootcfg.c
   linuxboot.c
   unpack.c
+  pc.h
+  pc.c
+  ide.c
+  vga.c
+  apic.c
+  rtc.c
+  bios_blob.c
   font8x16.h
   host_uefi.c
   x64e_el.h
@@ -65,6 +72,8 @@
   gEfiDevicePathProtocolGuid
   gEfiCpuArchProtocolGuid
   gEfiUsbIoProtocolGuid
+  gEfiAbsolutePointerProtocolGuid
+  gEfiSimplePointerProtocolGuid
 
 [Guids]
   gEfiFileInfoGuid
