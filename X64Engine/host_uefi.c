@@ -190,61 +190,91 @@ host_idle_until (uint64_t deadline)
  * the movement matters, so the position is put back in the middle when it
  * nears an edge. A relative pointer (SimplePointer) is used if present.
  */
-static EFI_ABSOLUTE_POINTER_PROTOCOL *mAbs;
-static EFI_SIMPLE_POINTER_PROTOCOL   *mRel;
-static UINT64                        mAbsX, mAbsY, mAbsZ;
-static BOOLEAN                       mAbsValid;
+#define MAX_MICE  4
+static EFI_ABSOLUTE_POINTER_PROTOCOL *mAbs[MAX_MICE];
+static EFI_SIMPLE_POINTER_PROTOCOL   *mRel[MAX_MICE];
+static UINTN                         mAbsCount, mRelCount;
+static UINT64                        mAbsX[MAX_MICE], mAbsY[MAX_MICE], mAbsZ[MAX_MICE];
+static BOOLEAN                       mAbsValid[MAX_MICE];
 static int                           mButtons;
 
+/* the mice themselves, not the console's merged pointer (it scales and clips) */
 static void
 mouse_open (void)
 {
-  if (EFI_ERROR (gBS->LocateProtocol (&gEfiSimplePointerProtocolGuid, NULL, (VOID **)&mRel))) {
-    mRel = NULL;
+  EFI_HANDLE *h;
+  UINTN      n, i;
+  VOID       *p;
+
+  mAbsCount = mRelCount = 0;
+  if (!EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiSimplePointerProtocolGuid, NULL, &n, &h))) {
+    for (i = 0; i < n && mRelCount < MAX_MICE; i++) {
+      if (h[i] != gST->ConsoleInHandle &&
+          !EFI_ERROR (gBS->HandleProtocol (h[i], &gEfiSimplePointerProtocolGuid, &p))) {
+        mRel[mRelCount++] = p;
+      }
+    }
+
+    FreePool (h);
   }
 
-  if (mRel != NULL || EFI_ERROR (gBS->LocateProtocol (&gEfiAbsolutePointerProtocolGuid, NULL, (VOID **)&mAbs))) {
-    mAbs = NULL;
+  if (!EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiAbsolutePointerProtocolGuid, NULL, &n, &h))) {
+    for (i = 0; i < n && mAbsCount < MAX_MICE; i++) {
+      if (h[i] != gST->ConsoleInHandle &&
+          !EFI_ERROR (gBS->HandleProtocol (h[i], &gEfiAbsolutePointerProtocolGuid, &p))) {
+        mAbsValid[mAbsCount] = FALSE;
+        mAbs[mAbsCount++]    = p;
+      }
+    }
+
+    FreePool (h);
   }
 
-  host_log ("x64e: mouse: %s\n", mRel ? "relative pointer" : mAbs ? "USB mouse" : "none");
+  host_log ("x64e: mice: %u\n", (unsigned)(mAbsCount + mRelCount));
 }
 
 static void
 mouse_poll (machine_t *m)
 {
-  if (mRel != NULL) {
+  UINTN i;
+
+  for (i = 0; i < mRelCount; i++) {
     EFI_SIMPLE_POINTER_STATE st;
 
-    if (!EFI_ERROR (mRel->GetState (mRel, &st))) {
-      INT32 rx = mRel->Mode->ResolutionX ? (INT32)mRel->Mode->ResolutionX : 1;
-      INT32 ry = mRel->Mode->ResolutionY ? (INT32)mRel->Mode->ResolutionY : 1;
+    if (!EFI_ERROR (mRel[i]->GetState (mRel[i], &st))) {
+      INT32 rx = mRel[i]->Mode->ResolutionX ? (INT32)mRel[i]->Mode->ResolutionX : 1;
+      INT32 ry = mRel[i]->Mode->ResolutionY ? (INT32)mRel[i]->Mode->ResolutionY : 1;
 
       mButtons = (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0);
       i8042_mouse (m, st.RelativeMovementX / rx, -(st.RelativeMovementY / ry), 0, mButtons);
     }
-  } else if (mAbs != NULL) {
+  }
+
+  for (i = 0; i < mAbsCount; i++) {
     EFI_ABSOLUTE_POINTER_STATE st;
 
-    if (!EFI_ERROR (mAbs->GetState (mAbs, &st))) {
-      UINT64 maxx = mAbs->Mode->AbsoluteMaxX, maxy = mAbs->Mode->AbsoluteMaxY;
-      int    b    = ((st.ActiveButtons & 1) ? 1 : 0) | ((st.ActiveButtons & 2) ? 2 : 0);
+    if (!EFI_ERROR (mAbs[i]->GetState (mAbs[i], &st))) {
+      UINT64 maxx = mAbs[i]->Mode->AbsoluteMaxX, maxy = mAbs[i]->Mode->AbsoluteMaxY;
 
-      if (mAbsValid) {
-        i8042_mouse (m, (int)(INT64)(st.CurrentX - mAbsX), -(int)(INT64)(st.CurrentY - mAbsY),
-                     -(int)(INT64)(st.CurrentZ - mAbsZ), b);
+      mButtons = ((st.ActiveButtons & 1) ? 1 : 0) | ((st.ActiveButtons & 2) ? 2 : 0);
+      if (mAbsValid[i]) {
+        i8042_mouse (m, (int)(INT64)(st.CurrentX - mAbsX[i]), -(int)(INT64)(st.CurrentY - mAbsY[i]),
+                     -(int)(INT64)(st.CurrentZ - mAbsZ[i]), mButtons);
+      } else {
+        i8042_mouse (m, 0, 0, 0, mButtons);
       }
 
-      mButtons  = b;
-      mAbsX     = st.CurrentX;
-      mAbsY     = st.CurrentY;
-      mAbsZ     = st.CurrentZ;
-      mAbsValid = TRUE;
+      mAbsX[i]     = st.CurrentX;
+      mAbsY[i]     = st.CurrentY;
+      mAbsZ[i]     = st.CurrentZ;
+      mAbsValid[i] = TRUE;
       if (maxx > 16 && maxy > 16 &&
           (st.CurrentX < maxx / 8 || st.CurrentX > maxx - maxx / 8 ||
            st.CurrentY < maxy / 8 || st.CurrentY > maxy - maxy / 8)) {
-        mAbs->Reset (mAbs, FALSE);       /* back to the middle */
-        mAbsValid = FALSE;
+        mAbs[i]->Reset (mAbs[i], FALSE);      /* back to the middle */
+        mAbsX[i] = DivU64x32 (maxx + mAbs[i]->Mode->AbsoluteMinX, 2);
+        mAbsY[i] = DivU64x32 (maxy + mAbs[i]->Mode->AbsoluteMinY, 2);
+        mAbsZ[i] = 0;
       }
     }
   }
