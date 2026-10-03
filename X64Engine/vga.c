@@ -643,6 +643,8 @@ canvas_open (machine_t *m, vga_t *v, canvas_t *c, uint32_t w, uint32_t h)
   if (w != v->last_w || h != v->last_h) {
     uint32_t y;
 
+    host_log ("x64e: screen %ux%u (%s)\n", w, h, vbe_on (v) ? "VBE" : (v->gr[6] & 1) ? "VGA graphics" : "text");
+
     for (y = 0; y < m->fb_h; y++) {
       memset (m->fb + (size_t)y * m->fb_stride, 0, (size_t)m->fb_w * 4);
     }

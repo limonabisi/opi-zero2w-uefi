@@ -4,6 +4,10 @@
 #include "x64e.h"
 #include "pc.h"
 
+/* X64E_IOLOG=lo-hi (hex): log port accesses of the PC BIOS machine */
+static int      io_log;
+static uint32_t io_log_lo, io_log_hi;
+
 static uint32_t
 io_in (uc_engine *uc, uint32_t port, int size, void *opaque)
 {
@@ -13,7 +17,12 @@ io_in (uc_engine *uc, uint32_t port, int size, void *opaque)
   (void)uc;
   m->io_exits++;
   if (m->pc_bios && pc_io_read (m, (uint16_t)port, size, &v)) {
-    return size == 1 ? (v & 0xff) : size == 2 ? (v & 0xffff) : v;
+    v = size == 1 ? (v & 0xff) : size == 2 ? (v & 0xffff) : v;
+    if (io_log && port >= io_log_lo && port <= io_log_hi) {
+      host_log ("[in  %03x/%d = %x]\n", port, size, v);
+    }
+
+    return v;
   }
 
   switch (port) {
@@ -66,6 +75,10 @@ io_in (uc_engine *uc, uint32_t port, int size, void *opaque)
     v &= 0xffff;
   }
 
+  if (io_log && port >= io_log_lo && port <= io_log_hi) {
+    host_log ("[in  %03x/%d = %x]\n", port, size, v);
+  }
+
   return v;
 }
 
@@ -76,6 +89,10 @@ io_out (uc_engine *uc, uint32_t port, int size, uint32_t val, void *opaque)
 
   (void)uc;
   m->io_exits++;
+  if (io_log && port >= io_log_lo && port <= io_log_hi) {
+    host_log ("[out %03x/%d = %x]\n", port, size, val);
+  }
+
   if (m->pc_bios && pc_io_write (m, (uint16_t)port, size, val)) {
     return;
   }
@@ -228,8 +245,57 @@ machine_v2p (machine_t *m, uint64_t va, uint64_t *pa)
     return *pa < m->ram_size ? 0 : -1;
   }
 
+  if (!(s[22] & 0x400) && !(s[21] & 0x20)) {
+    /* 32-bit paging */
+    uint32_t pde, pte;
+
+    va &= 0xffffffffULL;
+    table = s[20] & 0xfffff000ULL;
+    if (table + 4096 > m->ram_size) {
+      return -1;
+    }
+
+    pde = *(uint32_t *)(m->ram + table + (va >> 22) * 4);
+    if (!(pde & 1)) {
+      return -1;
+    }
+
+    if ((pde & 0x80) && (s[21] & 0x10)) {
+      *pa = (pde & 0xffc00000u) | (va & 0x3fffff);
+      return *pa < m->ram_size ? 0 : -1;
+    }
+
+    if ((uint64_t)(pde & 0xfffff000u) + 4096 > m->ram_size) {
+      return -1;
+    }
+
+    pte = *(uint32_t *)(m->ram + (pde & 0xfffff000u) + ((va >> 12) & 1023) * 4);
+    if (!(pte & 1)) {
+      return -1;
+    }
+
+    *pa = (pte & 0xfffff000u) | (va & 0xfff);
+    return *pa < m->ram_size ? 0 : -1;
+  }
+
   table = s[20] & 0x000ffffffffff000ULL;
-  for (level = 4; level >= 1; level--) {
+  if (!(s[22] & 0x400)) {
+    /* PAE: four page directory pointers */
+    va &= 0xffffffffULL;
+    table = s[20] & 0xffffffe0ULL;
+    if (table + 32 > m->ram_size) {
+      return -1;
+    }
+
+    e = *(uint64_t *)(m->ram + table + ((va >> 30) & 3) * 8);
+    if (!(e & 1)) {
+      return -1;
+    }
+
+    table = e & 0x000ffffffffff000ULL;
+  }
+
+  for (level = (s[22] & 0x400) ? 4 : 2; level >= 1; level--) {
     shift = 12 + 9 * (level - 1);
     if (table + 4096 > m->ram_size) {
       return -1;
@@ -366,6 +432,14 @@ machine_init1 (machine_t *m, uint64_t ram_mb, int pc)
   if (getenv ("X64E_STOPEVERY")) {
     stop_every = (uint64_t)parse_uint (getenv ("X64E_STOPEVERY"));
     uc_hook_add (m->uc, &h, UC_HOOK_BLOCK, stop_block, m, 1, 0);
+  }
+
+  if (getenv ("X64E_IOLOG")) {
+    const char *e = getenv ("X64E_IOLOG");
+
+    io_log    = 1;
+    io_log_lo = (uint32_t)strtoul (e, (char **)&e, 16);
+    io_log_hi = *e ? (uint32_t)strtoul (e + 1, NULL, 16) : io_log_lo;
   }
 
   if (getenv ("X64E_BTRACE")) {
@@ -618,6 +692,15 @@ machine_run (machine_t *m)
         next = now + 10000000ULL;
       }
 
+      if (getenv ("X64E_IDLEDBG")) {
+        static uint64_t n;
+        if ((++n % 200000) == 0) {
+          host_log ("idle: now %llu pit %llu pc %llu irq %d picout %d\n", (unsigned long long)now,
+                    (unsigned long long)pit_next_event (m), (unsigned long long)(m->pc_bios ? pc_next_event (m) : 0),
+                    m->cpu_irq_level, m->pic_out);
+        }
+      }
+
       if (next > now) {
         host_idle_until (next);
         m->idle_ns += host_now_ns () - now;
@@ -684,6 +767,10 @@ machine_run (machine_t *m)
                 (unsigned long long)((m->idle_ns - last_idle) * 100 / (now - last_report + 1)),
                 (unsigned long long)rip);
       host_log ("\n%s\n", m->ov_line[2]);
+      if (getenv ("X64E_DUMPEVERY")) {
+        machine_dump (m, "periodic");
+      }
+
       last_idle   = m->idle_ns;
       if (prof) {
         prof_dump ();

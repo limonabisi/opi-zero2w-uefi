@@ -36,13 +36,20 @@ mq_push (machine_t *m, uint8_t b)
 
 /* a reply from the controller itself: not held back by a disabled port */
 static void
-cq_push (machine_t *m, uint8_t b)
+cq_push_src (machine_t *m, uint8_t b, uint8_t src)
 {
   i8042_t *k = &m->kbd;
 
   if ((uint8_t)(k->chead - k->ctail) < sizeof (k->cq)) {
+    k->csrc[k->chead % sizeof (k->cq)] = src;
     k->cq[k->chead++ % sizeof (k->cq)] = b;
   }
+}
+
+static void
+cq_push (machine_t *m, uint8_t b)
+{
+  cq_push_src (m, b, SRC_KBD);
 }
 
 static void
@@ -53,8 +60,8 @@ kbd_update_irq (machine_t *m)
 
   if (!k->obf) {
     if (k->chead != k->ctail) {
+      k->src = k->csrc[k->ctail % sizeof (k->cq)];
       k->out = k->cq[k->ctail++ % sizeof (k->cq)];
-      k->src = SRC_KBD;
       k->obf = fresh = 1;
     } else if (k->head != k->tail && !(k->ccb & 0x10)) {
       k->out = k->q[k->tail++ % sizeof (k->q)];
@@ -402,16 +409,17 @@ i8042_io_write (machine_t *m, uint16_t port, uint8_t v)
 
       break;
     case 0xd2:
-      kq_push (m, v);
+      cq_push (m, v);
       break;
-    case 0xd3:
+    case 0xd3:                  /* loop back through the auxiliary port */
       if (m->pc_bios) {
-        mq_push (m, v);
+        cq_push_src (m, v, SRC_AUX);
       }
 
       break;
     case 0xd4:
       if (m->pc_bios) {
+        k->ccb &= ~0x20;        /* talking to the mouse turns its clock on */
         mouse_command (m, v);
       }
 

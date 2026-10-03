@@ -31,7 +31,7 @@ index 3a6c8d4..a978d2e 100644
  #ifdef __cplusplus
  }
 diff --git a/qemu/target/i386/misc_helper.c b/qemu/target/i386/misc_helper.c
-index f04f023..d2bcd8c 100644
+index f04f023..d06b04e 100644
 --- a/qemu/target/i386/misc_helper.c
 +++ b/qemu/target/i386/misc_helper.c
 @@ -150,8 +150,7 @@ target_ulong helper_read_crN(CPUX86State *env, int reg)
@@ -54,7 +54,19 @@ index f04f023..d2bcd8c 100644
          break;
      default:
          env->cr[reg] = t0;
-@@ -255,7 +257,9 @@ void helper_wrmsr(CPUX86State *env)
+@@ -245,6 +247,11 @@ void helper_wrmsr(CPUX86State *env)
+         ((uint64_t)((uint32_t)env->regs[R_EDX]) << 32);
+ 
+     switch ((uint32_t)env->regs[R_ECX]) {
++    case MSR_IA32_TSC:
++        if (env->uc->x86_apic_set) {    /* x64 engine, PC BIOS machine */
++            env->tsc_offset = val - cpu_get_tsc(env);
++        }
++        break;
+     case MSR_IA32_SYSENTER_CS:
+         env->sysenter_cs = val & 0xffff;
+         break;
+@@ -255,7 +262,9 @@ void helper_wrmsr(CPUX86State *env)
          env->sysenter_eip = val;
          break;
      case MSR_IA32_APICBASE:
@@ -65,7 +77,17 @@ index f04f023..d2bcd8c 100644
          break;
      case MSR_EFER:
          {
-@@ -413,7 +417,7 @@ void helper_rdmsr(CPUX86State *env)
+@@ -403,6 +412,9 @@ void helper_rdmsr(CPUX86State *env)
+     cpu_svm_check_intercept_param(env, SVM_EXIT_MSR, 0, GETPC());
+ 
+     switch ((uint32_t)env->regs[R_ECX]) {
++    case MSR_IA32_TSC:
++        val = cpu_get_tsc(env) + env->tsc_offset;
++        break;
+     case MSR_IA32_SYSENTER_CS:
+         val = env->sysenter_cs;
+         break;
+@@ -413,7 +425,7 @@ void helper_rdmsr(CPUX86State *env)
          val = env->sysenter_eip;
          break;
      case MSR_IA32_APICBASE:
@@ -74,8 +96,74 @@ index f04f023..d2bcd8c 100644
          break;
      case MSR_EFER:
          val = env->efer;
+diff --git a/qemu/target/i386/seg_helper.c b/qemu/target/i386/seg_helper.c
+index 83690a6..872b4f5 100644
+--- a/qemu/target/i386/seg_helper.c
++++ b/qemu/target/i386/seg_helper.c
+@@ -2390,6 +2390,40 @@ void helper_sysenter(CPUX86State *env, int next_eip_addend)
+ {
+     // Unicorn: call registered SYSENTER hooks
+     struct hook *hook;
++
++    if (env->uc->x86_system_mode) {
++        // x64 engine: architectural SYSENTER (from upstream QEMU)
++        if (env->sysenter_cs == 0) {
++            raise_exception_err_ra(env, EXCP0D_GPF, 0, GETPC());
++        }
++        env->eflags &= ~(VM_MASK | IF_MASK | RF_MASK);
++#ifdef TARGET_X86_64
++        if (env->hflags & HF_LMA_MASK) {
++            cpu_x86_load_seg_cache(env, R_CS, env->sysenter_cs & 0xfffc,
++                                   0, 0xffffffff,
++                                   DESC_G_MASK | DESC_P_MASK |
++                                   DESC_S_MASK |
++                                   DESC_CS_MASK | DESC_R_MASK | DESC_A_MASK |
++                                   DESC_L_MASK);
++        } else
++#endif
++        {
++            cpu_x86_load_seg_cache(env, R_CS, env->sysenter_cs & 0xfffc,
++                                   0, 0xffffffff,
++                                   DESC_G_MASK | DESC_B_MASK | DESC_P_MASK |
++                                   DESC_S_MASK |
++                                   DESC_CS_MASK | DESC_R_MASK | DESC_A_MASK);
++        }
++        cpu_x86_load_seg_cache(env, R_SS, (env->sysenter_cs + 8) & 0xfffc,
++                               0, 0xffffffff,
++                               DESC_G_MASK | DESC_B_MASK | DESC_P_MASK |
++                               DESC_S_MASK |
++                               DESC_W_MASK | DESC_A_MASK);
++        env->regs[R_ESP] = env->sysenter_esp;
++        env->eip = env->sysenter_eip;
++        return;
++    }
++
+     HOOK_FOREACH_VAR_DECLARE;
+     HOOK_FOREACH(env->uc, hook, UC_HOOK_INSN) {
+         if (hook->to_delete)
+diff --git a/qemu/target/i386/translate.c b/qemu/target/i386/translate.c
+index b84abf2..be225f1 100644
+--- a/qemu/target/i386/translate.c
++++ b/qemu/target/i386/translate.c
+@@ -744,11 +744,14 @@ static void gen_check_io(DisasContext *s, MemOp ot, target_ulong cur_eip,
+                          uint32_t svm_flags)
+ {
+     // Unicorn: allow all I/O instructions
+-    return;
+-
++    // x64 engine: the real I/O permission checks in system mode
+     TCGContext *tcg_ctx = s->uc->tcg_ctx;
+     target_ulong next_eip;
+ 
++    if (!s->uc->x86_system_mode) {
++        return;
++    }
++
+     if (s->pe && (s->cpl > s->iopl || s->vm86)) {
+         tcg_gen_trunc_tl_i32(tcg_ctx, s->tmp2_i32, s->T0);
+         switch (ot) {
 diff --git a/qemu/target/i386/unicorn.c b/qemu/target/i386/unicorn.c
-index bcc281f..722e216 100644
+index bcc281f..c14bc78 100644
 --- a/qemu/target/i386/unicorn.c
 +++ b/qemu/target/i386/unicorn.c
 @@ -10,6 +10,7 @@
@@ -86,7 +174,7 @@ index bcc281f..722e216 100644
  
  #define FPST(n) (env->fpregs[(env->fpstt + (n)) & 7].d)
  
-@@ -1819,3 +1820,56 @@ void uc_x86_kick(struct uc_struct *uc)
+@@ -1819,3 +1820,59 @@ void uc_x86_kick(struct uc_struct *uc)
  {
      cpu_exit(uc->cpu);
  }
@@ -101,6 +189,8 @@ index bcc281f..722e216 100644
 +    uc->x86_apic_opaque = opaque;
 +    if (uc->cpu) {
 +        ((CPUX86State *)uc->cpu->env_ptr)->features[FEAT_1_EDX] |= CPUID_APIC;
++        /* TCG has no virtual-8086 mode extensions */
++        ((CPUX86State *)uc->cpu->env_ptr)->features[FEAT_1_EDX] &= ~CPUID_VME;
 +    }
 +}
 +
@@ -138,6 +228,7 @@ index bcc281f..722e216 100644
 +    cpu_load_eflags(env, 0x2, ~0);
 +    env->hflags2 |= HF2_GIF_MASK;
 +    env->v_tpr = 0;
++    env->tsc_offset = 0 - cpu_get_tsc(env);     /* the counter starts at zero */
 +    cs->halted = 0;
 +    cs->exception_index = -1;
 +    cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);

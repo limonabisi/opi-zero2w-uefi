@@ -92,7 +92,7 @@ typedef struct {
   uint8_t head, tail;
   uint8_t mq[256];                      /* PS/2 mouse (PC BIOS machine) */
   uint8_t mhead, mtail;
-  uint8_t cq[8];                        /* controller replies */
+  uint8_t cq[8], csrc[8];               /* controller replies */
   uint8_t chead, ctail;
   uint8_t out, obf, src, ccb, pending, kbd_param, scanning, last_was_cmd, irq_level, aux_irq_level, outport;
   uint8_t mouse_on, mouse_param, mouse_rate, mouse_res, mouse_id, mouse_seq[3], mouse_buttons, mouse_wrap, mouse_scale;

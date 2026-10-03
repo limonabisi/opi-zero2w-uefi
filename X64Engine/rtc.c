@@ -159,10 +159,8 @@ rtc_set_period (rtc_t *r, uint64_t now)
     rate += 7;
   }
 
-  r->period = 1000000000ULL * (1u << (rate - 1)) / 32768;
-  if (r->next_periodic == 0 || r->next_periodic > now + r->period) {
-    r->next_periodic = now + r->period;
-  }
+  r->period        = 1000000000ULL * (1u << (rate - 1)) / 32768;
+  r->next_periodic = now + r->period;
 }
 
 void
@@ -176,14 +174,20 @@ rtc_tick (machine_t *m, uint64_t now)
   }
 
   if (r->next_periodic && now >= r->next_periodic) {
-    /* one tick per call; a guest that fell behind gets the ticks it missed
-       (it counts them to keep time), up to a second's worth */
-    if (!(r->cmos[REG_C] & C_PF) || !(r->cmos[REG_B] & B_PIE)) {
+    if (!(r->cmos[REG_B] & B_PIE)) {
+      /* only polled: no ticks to make up */
+      r->cmos[REG_C]  |= C_PF;
+      r->next_periodic = now + r->period;
+    } else if (!(r->cmos[REG_C] & C_PF)) {
+      /* one tick per call. A guest that counts ticks to keep time gets the
+         ones it missed while the engine was busy, a few at most. */
       r->cmos[REG_C]   |= C_PF;
       r->next_periodic += r->period;
-      if (r->next_periodic + 1000000000ULL < now) {
-        r->next_periodic = now;
+      if (r->next_periodic + 8 * r->period < now) {
+        r->next_periodic = now - 8 * r->period;
       }
+    } else if (r->next_periodic + 8 * r->period < now) {
+      r->next_periodic = now - 8 * r->period;   /* the guest is not taking them */
     }
   }
 
@@ -251,7 +255,6 @@ rtc_io_read (machine_t *m, uint16_t port, int size, uint32_t *val)
     /* update in progress during the last 2 ms of a second */
     *val = (r->cmos[REG_A] & 0x7f) | (((m->boot_ns + now) % 1000000000ULL) > 998000000ULL ? 0x80 : 0);
   } else if (i == REG_C) {
-    rtc_tick (m, now);
     *val           = r->cmos[REG_C];
     r->cmos[REG_C] = 0;
     rtc_irq (m, r);
@@ -313,6 +316,10 @@ rtc_io_write (machine_t *m, uint16_t port, int size, uint32_t val)
       } else if ((val ^ r->cmos[REG_B]) & (B_DM | B_24H)) {
         r->cmos[REG_B] = (uint8_t)val;
         rtc_load (m, r, now);
+      }
+
+      if ((val & B_PIE) && !(r->cmos[REG_B] & B_PIE) && r->next_periodic) {
+        r->next_periodic = now + r->period;       /* a full period to the first interrupt */
       }
 
       r->cmos[REG_B] = (uint8_t)val;
