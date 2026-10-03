@@ -63,10 +63,23 @@ host_progress (const char *what, unsigned percent)
   (void)percent;
 }
 
+static void fb_dump (void);
+
 void
 host_poll_input (machine_t *m)
 {
-  (void)m;
+  fb_dump ();
+  /* X64E_MOUSETEST: the pointer drifts right and down, to test the PS/2 mouse */
+  static uint64_t last;
+  uint64_t        now = host_now_ns ();
+
+  static int      moves;
+
+  if (getenv ("X64E_MOUSETEST") && now - last > 100000000ULL && moves < 40) {
+    last = now;
+    moves += m->kbd.mouse_on;
+    i8042_mouse (m, 4, -3, 0, 0);
+  }
 }
 
 static machine_t *fb_machine;
@@ -79,7 +92,7 @@ fb_dump (void)
   FILE           *f;
   uint32_t        x, y;
 
-  if (!fb_machine || !fb_machine->fb || !getenv ("X64E_FBDUMP") || now - last < 2000000000ULL) {
+  if (!fb_machine || !fb_machine->fb || !getenv ("X64E_FBDUMP") || now - last < 1000000000ULL) {
     return;
   }
 

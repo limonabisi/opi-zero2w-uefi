@@ -643,7 +643,12 @@ canvas_open (machine_t *m, vga_t *v, canvas_t *c, uint32_t w, uint32_t h)
   if (w != v->last_w || h != v->last_h) {
     uint32_t y;
 
-    host_log ("x64e: screen %ux%u (%s)\n", w, h, vbe_on (v) ? "VBE" : (v->gr[6] & 1) ? "VGA graphics" : "text");
+    host_log ("x64e: screen %ux%u (%s", w, h, vbe_on (v) ? "VBE" : (v->gr[6] & 1) ? "VGA graphics" : "text");
+    if (vbe_on (v)) {
+      host_log (", %u bpp, line %u, start %u, frame buffer at %x", v->vbe[3], v->vbe_line, v->vbe_start, v->lfb_mapped);
+    }
+
+    host_log (")\n");
 
     for (y = 0; y < m->fb_h; y++) {
       memset (m->fb + (size_t)y * m->fb_stride, 0, (size_t)m->fb_w * 4);
@@ -908,7 +913,7 @@ vga_pci_changed (machine_t *m, pci_dev_t *d, unsigned reg)
   uint32_t want = pci_bar_mem (d, 0);
 
   (void)reg;
-  if (want < 0x80000000u || want > 0xfe000000u - VRAM_SIZE) {
+  if (want < 0x80000000u || want > 0xfec00000u - VRAM_SIZE) {
     want = 0;                         /* not placed yet (or being sized) */
   }
 
