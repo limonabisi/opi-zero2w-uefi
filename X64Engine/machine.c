@@ -325,7 +325,8 @@ machine_init (machine_t *m, uint64_t ram_mb)
   }
 
   uc_ctl_set_cpu_model (m->uc, UC_CPU_X86_QEMU64);
-  uc_x86_set_system_mode (m->uc, getenv ("X64E_NOPCID") ? 3 : 1);
+  uc_x86_set_system_mode (m->uc, 1 | (getenv ("X64E_NOPCID") ? 2 : 0) | (x64e_opt_nobulk ? 4 : 0) |
+                          (x64e_opt_nokchain ? 8 : 0) | (x64e_opt_nolookup ? 16 : 0));
   uc_ctl_exits_enable (m->uc);          /* no stop address: we stop by kicks */
 
   m->ram_size = ram_mb << 20;
@@ -448,13 +449,54 @@ prof_dump (void)
   }
 }
 
+/*
+ * F11: the engine's counters, drawn over the top of the x86 screen
+ * (32 bpp frame buffer, 8x16 glyphs, white on black).
+ */
+#include "font8x16.h"
+
+static void
+overlay_draw (machine_t *m)
+{
+  int      row, col, y, x;
+  uint32_t cols = m->fb_w / 8;
+
+  if (!m->fb || m->fb_h < 80 || cols < 40) {
+    return;
+  }
+
+  for (row = 0; row < 4; row++) {
+    const char *t   = m->ov_line[row];
+    int         end = 0;
+
+    for (col = 0; col < (int)cols; col++) {
+      unsigned             ch = end ? ' ' : (unsigned char)t[col];
+      const unsigned char *g;
+
+      if (ch == 0) {
+        end = 1;
+        ch  = ' ';
+      }
+
+      g = x64e_font8x16[ch >= 32 && ch < 127 ? ch - 32 : 0];
+      for (y = 0; y < 16; y++) {
+        uint32_t *p = (uint32_t *)(m->fb + (size_t)(row * 16 + y) * m->fb_stride) + col * 8;
+
+        for (x = 0; x < 8; x++) {
+          p[x] = (g[y] & (0x80 >> x)) ? 0x00ffffffu : 0;
+        }
+      }
+    }
+  }
+}
+
 void
 machine_run (machine_t *m)
 {
   int prof = getenv ("X64E_PCPROF") != NULL;
   uint64_t pc, now, next;
   uc_err   err;
-  uint64_t last_report = 0, last_idle = 0;
+  uint64_t last_report = 0, last_idle = 0, last_draw = 0;
   int      trace = getenv ("X64E_TRACE") != NULL;
 
   pc = uc_x86_get_pc64 (m->uc);
@@ -504,6 +546,10 @@ machine_run (machine_t *m)
       uc_reg_read (m->uc, UC_X86_REG_EFLAGS, &fl);
       if (!(fl & 0x200)) {
         host_log ("\nx64e: the x86 system halted (powered off)\n");
+        if (prof) {
+          prof_dump ();
+        }
+
         return;
       }
 
@@ -525,45 +571,65 @@ machine_run (machine_t *m)
     }
 
     now = host_now_ns ();
-    if (now - last_report > 30000000000ULL) {
+    if (m->overlay && now - last_draw > 250000000ULL) {
+      overlay_draw (m);
+      last_draw = now;
+    }
+
+    if (now - last_report > (m->overlay ? 3000000000ULL : 30000000000ULL)) {
       uint64_t rip = uc_x86_get_pc64 (m->uc);
 
       {
         uint64_t sh[10];
 
         uc_x64e_shadow_stats (m->uc, sh);
+        snprintf (m->ov_line[0], sizeof (m->ov_line[0]),
+                  "[x64e] shadow: %llu fills, %llu slow (%llu #PF, %llu io, %llu code), %llu wprot, %llu drops,"
+                  " %llu large inv, %llu tables, %llu shared",
+                  (unsigned long long)sh[0], (unsigned long long)sh[1], (unsigned long long)sh[6],
+                  (unsigned long long)sh[7], (unsigned long long)sh[8], (unsigned long long)sh[2],
+                  (unsigned long long)sh[3], (unsigned long long)sh[9], (unsigned long long)sh[4],
+                  (unsigned long long)sh[5]);
         if (sh[0] || sh[1]) {
-          host_log ("\n[x64e] shadow: %llu fills, %llu slow (%llu #PF, %llu io, %llu code), %llu wprot, %llu drops,"
-                    " %llu large inv, %llu tables, %llu shared\n",
-                    (unsigned long long)sh[0], (unsigned long long)sh[1], (unsigned long long)sh[6],
-                    (unsigned long long)sh[7], (unsigned long long)sh[8], (unsigned long long)sh[2],
-                    (unsigned long long)sh[3], (unsigned long long)sh[9], (unsigned long long)sh[4],
-                    (unsigned long long)sh[5]);
+          host_log ("\n%s\n", m->ov_line[0]);
         }
       }
       {
-        static uint64_t ptr[4], pf[2], pt;
-        uint64_t        tr[4], f[2], span = now - pt;
+        static uint64_t ptr[6], pf[2], pt;
+        uint64_t        tr[6], f[2], span = now - pt;
 
         uc_x64e_perf (m->uc, tr);
         host_perf (f);
         if (pt != 0 && span != 0) {
-          host_log ("\n[x64e] time: %llu%% MMU faults (%llu), %llu%% translating (%llu blocks), %llu code cache flushes\n",
+          snprintf (m->ov_line[1], sizeof (m->ov_line[1]),
+                    "[x64e] time: %llu%% MMU faults (%llu), %llu%% translating (%llu blocks), %llu code cache flushes,"
+                    " %llu MB bulk copies",
                     (unsigned long long)((f[1] - pf[1]) * 100 / span), (unsigned long long)(f[0] - pf[0]),
                     (unsigned long long)((tr[1] - ptr[1]) * 100 / span), (unsigned long long)(tr[0] - ptr[0]),
-                    (unsigned long long)tr[2]);
+                    (unsigned long long)tr[2], (unsigned long long)((tr[3] - ptr[3]) >> 20));
+          host_log ("\n%s\n", m->ov_line[1]);
+        }
+
+        snprintf (m->ov_line[3], sizeof (m->ov_line[3]),
+                  "[x64e] memory: x86 RAM %llu MB, firmware free %llu MB, code cache %llu of %llu MB    (F11 hides this)",
+                  (unsigned long long)(m->ram_size >> 20), (unsigned long long)host_free_mb (),
+                  (unsigned long long)(tr[4] >> 20), (unsigned long long)(tr[5] >> 20));
+        if (m->overlay) {
+          host_log ("\n%s\n", m->ov_line[3]);
         }
 
         memcpy (ptr, tr, sizeof (ptr));
         memcpy (pf, f, sizeof (pf));
         pt = now;
       }
-      host_log ("\n[x64e] %llus: %llu runs, %llu io, %llu irqs, idle %llu%%, rip %llx\n",
+      snprintf (m->ov_line[2], sizeof (m->ov_line[2]),
+                "[x64e] %llus: %llu runs, %llu io, %llu irqs, idle %llu%%, rip %llx",
                 (unsigned long long)(now / 1000000000ULL),
                 (unsigned long long)m->runs, (unsigned long long)m->io_exits,
                 (unsigned long long)m->irqs,
                 (unsigned long long)((m->idle_ns - last_idle) * 100 / (now - last_report + 1)),
                 (unsigned long long)rip);
+      host_log ("\n%s\n", m->ov_line[2]);
       last_idle   = m->idle_ns;
       if (prof) {
         prof_dump ();

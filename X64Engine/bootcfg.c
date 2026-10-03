@@ -473,5 +473,6 @@ iso_boot (machine_t *m, iso_t *iso, bootent_t *e, const char *extra_args)
     off += (psz + 3) & ~(size_t)3;
   }
 
+  linux_initrd_unpack (m);
   return 0;
 }

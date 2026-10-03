@@ -27,6 +27,8 @@
   iso9660.c
   bootcfg.c
   linuxboot.c
+  unpack.c
+  font8x16.h
   host_uefi.c
   x64e_el.h
 

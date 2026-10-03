@@ -98,6 +98,8 @@ linux_boot_setup (machine_t *m, const uint8_t *k, size_t ksize,
     }
 
     m->initrd_addr = initrd_addr;     /* initrd == NULL: the caller fills it */
+    m->initrd_size = isize;
+    m->kernel_end  = load + rd32 (k + 0x260);
     wr32 (bp + 0x218, (uint32_t)initrd_addr);
     wr32 (bp + 0x21c, (uint32_t)isize);
   }
@@ -155,4 +157,41 @@ linux_boot_setup (machine_t *m, const uint8_t *k, size_t ksize,
             (unsigned)(ksize / 1024), (unsigned long long)load, version,
             (unsigned)(isize / 1024), (unsigned long long)initrd_addr);
   return 0;
+}
+
+/*
+ * The initrd is in guest RAM, at the top: unpack it (unpack.c) into the
+ * free memory right above the kernel and point the kernel there. If it
+ * cannot be unpacked, or the unpacked archive plus the files the kernel
+ * makes from it would not fit comfortably, everything stays as it was.
+ */
+void
+linux_initrd_unpack (machine_t *m)
+{
+  uint8_t  *bp = m->ram + ZERO_PAGE;
+  uint64_t  lo = (m->kernel_end + 0x1fffffULL) & ~0x1fffffULL;
+  uint64_t  t0 = host_now_ns ();
+  size_t    out;
+
+  if (x64e_opt_nounpack || m->initrd_size == 0 || m->initrd_addr < lo + (16ULL << 20)) {
+    return;
+  }
+
+  out = initrd_unpack (m->ram + m->initrd_addr, m->initrd_size, m->ram + lo, m->initrd_addr - lo);
+  if (out == 0) {
+    host_log ("x64e: initrd left as it is (the x86 kernel unpacks it)\n");
+    return;
+  }
+
+  if (2 * (uint64_t)out + (128ULL << 20) > m->ram_size) {
+    host_log ("x64e: unpacked initrd too big for this much RAM (%u MB), left packed\n", (unsigned)(out >> 20));
+    return;
+  }
+
+  host_log ("x64e: initrd unpacked: %u KB -> %u KB in %u ms\n", (unsigned)(m->initrd_size / 1024),
+            (unsigned)(out / 1024), (unsigned)((host_now_ns () - t0) / 1000000));
+  m->initrd_addr = lo;
+  m->initrd_size = out;
+  wr32 (bp + 0x218, (uint32_t)lo);
+  wr32 (bp + 0x21c, (uint32_t)out);
 }

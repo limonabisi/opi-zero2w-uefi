@@ -153,7 +153,12 @@ typedef struct {
 /* host network: raw Ethernet frames; recv returns the length, 0 if none */
 int  host_net_send (const void *frame, uint32_t len);
 int  host_net_recv (void *frame, uint32_t max);
-void host_perf (uint64_t out[2]);     /* MMU faults handled, ns spent on them */
+extern int x64e_opt_nounpack;         /* 1: the x86 kernel unpacks its initrd itself */
+extern int x64e_opt_nolookup;         /* 1: no inline block lookup */
+extern int x64e_opt_nokchain;         /* 1: kernel blocks not chained across pages */
+extern int x64e_opt_nobulk;           /* 1: no native REP MOVS / STOS */
+void host_perf (uint64_t out[2]);
+uint64_t host_free_mb (void);        /* memory the firmware still has free */     /* MMU faults handled, ns spent on them */
 void vnet_init (machine_t *m, vnet_t *v, int slot, int irq, const uint8_t mac[6]);
 void vnet_poll (machine_t *m, vnet_t *v);
 int  vnet_io_read (machine_t *m, vnet_t *v, uint16_t off, int size, uint32_t *val);
@@ -231,11 +236,17 @@ struct machine {
   uint8_t     cmos[128];
   uint64_t    boot_ns;
   uint64_t    initrd_addr;
+  uint64_t    initrd_size;
+  int         overlay;                /* F11: counters drawn on the screen */
+  char        ov_line[4][200];
+  uint64_t    kernel_end;             /* end of the memory the kernel image needs */
   /* statistics */
   uint64_t    io_exits, irqs, runs, idle_ns;
 };
 
 /* boot */
+size_t initrd_unpack (const uint8_t *in, size_t in_len, uint8_t *out, size_t cap);
+void   linux_initrd_unpack (machine_t *m);
 int linux_boot_setup (machine_t *m, const uint8_t *kernel, size_t ksize,
                       const uint8_t *initrd, size_t isize, const char *cmdline);
 

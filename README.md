@@ -28,25 +28,54 @@ Feature status: **[docs/STATUS.md](docs/STATUS.md)**
 - ACPI tables (FADT, MADT, GTDT, DSDT, DBG2, SPCR) and SMBIOS
 - The OS is started at EL2, so hardware virtualization is available to it
 - UEFI Shell
-- **x64 Engine** (preview): a whole x86-64 PC emulated by the firmware, boots x86-64 Linux ISOs
+- USB network adapters and Android phone USB tethering (RNDIS, CDC-NCM, CDC-ECM)
+- **x64 Engine** (preview): a whole x86-64 PC emulated by the firmware; boots x86-64 Linux ISOs,
+  installs to the microSD card and boots the installed system, with network
 
 ## x64 Engine (preview)
 
 A complete x86-64 PC run by the firmware itself, so a 64-bit x86 **operating system** can boot on
 the board: CPU (unicorn / QEMU TCG in a new system mode), interrupt controller, timer, serial port,
-RTC, PS/2 keyboard, PCI, virtio disk and a framebuffer on the HDMI output. It reads the ISO's own
-GRUB / isolinux menu and starts the kernel from it; the ISO is the x86 system's `/dev/vda`.
+RTC, PS/2 keyboard, PCI, virtio disks, a virtio network card and a framebuffer on the HDMI output.
+It reads the ISO's own GRUB / isolinux menu and starts the kernel from it.
 
-1. Write the ISO to a USB drive (balenaEtcher), or copy the `.iso` file to the root of a FAT32 USB drive.
+1. Put the ISO on a USB drive: write it with balenaEtcher / Rufus, or copy the `.iso` file to a
+   FAT32 or exFAT drive (any folder, up to three levels deep). A **Ventoy** drive works as it is.
 2. Press **ESC** at boot, choose **x64 PC · run an x86-64 ISO**, pick the ISO and the menu entry.
-3. **F12** returns to the firmware. The x86 system's serial console is mirrored on the board's UART.
+3. **F12** returns to the firmware. **F11** shows the engine's counters on the screen.
 
 <p><img src="docs/images/x64engine-installer.png" width="49%" alt="Ubuntu x86-64 installer in the x64 Engine"></p>
 
-Status: the Ubuntu `mini.iso` x86-64 installer runs on the board (HDMI output, USB keyboard). The x86 machine
-gets the free memory (about 700 MB on a 1 GB board). Linux ISOs only (Windows x64 needs more than the
-board's 1 GB), no network card yet, and it is slow: expect pauses of 20-30 s between installer screens.
-Source and design notes: [X64Engine/](X64Engine/).
+What the x86 machine gets:
+
+| | |
+|---|---|
+| Memory | The free memory minus the engine's own needs: 768 MB on the 1 GB board |
+| ISO | `/dev/vdb`, read-only |
+| Hard disk | `/dev/vda`: the free space of the microSD card behind the firmware's partition (or an `x64disk*.img` file on a FAT drive). A system installed there shows up in the engine's menu as **Installed system on the hard disk** |
+| Network | A virtio network card on the firmware's USB network adapter: an Android phone with USB tethering switched on, or a USB Ethernet adapter. Plug it in (through a hub, next to the keyboard) before starting the engine |
+| Screen, keyboard | The HDMI framebuffer and the USB keyboard |
+
+How it is made fast (for an emulator on a Cortex-A53):
+
+- **Shadow MMU**: the engine runs at EL1 and maps the x86 address space through TTBR1, so translated
+  code reaches guest memory with a single load or store; the ARM MMU does the x86 page-table work.
+  The kernel half is built once and shared by all address spaces; PCIDs keep the others across switches.
+- **Block chaining**: kernel blocks are linked directly across pages, and the lookup at every `ret`
+  and indirect jump is done inline in the translated code.
+- **`rep movs` / `rep stos`** run as host `memcpy` / `memset`, a page pair at a time.
+- **The initrd is unpacked natively** (gzip, LZ4) before the x86 kernel starts.
+- **No address randomization in the guest** by default, so a program is translated once, not once
+  per process.
+
+`EFI\X64ENGINE\X64E.CFG` on the card turns these off one by one (`shadow=0`, `kchain=0`, `lookup=0`,
+`bulk=0`, `unpack=0`, `aslr=1`); `serial=1` sends the x86 kernel's log to the board's UART and `stats=1`
+starts with the counters on the screen.
+
+Status: on the board, Ubuntu x86-64 boots from the ISO (also from a Ventoy drive) and its installer
+goes online through a phone's USB tethering.
+Linux only (Windows x64 needs more than the board's 1 GB). It is an emulator: expect a small
+fraction of native speed. Source and design notes: [X64Engine/](X64Engine/).
 
 ## Install
 
@@ -97,7 +126,7 @@ setup screenshots were taken.
 |---|---|
 | `Platform/OrangePi/OrangePiZero2W` | Board: DSC/FDF, ACPI tables, setup application (`Applications/OpiSetup`), variable store, SMBIOS, logo, Secure Boot keys |
 | `Silicon/Allwinner/H616Pkg` | SoC drivers: MMC, USB (EHCI bring-up, OHCI), HDMI (DE33 + TCON + DW-HDMI), RTC, CPU clock and thermal sensor |
-| `patches/` | Small patches for EDK2 (USB root port reset, boot hot keys) and TF-A (BL33 hand-off without a DTB) |
+| `patches/` | Patches for EDK2 (USB root port reset, boot hot keys, RNDIS for Android tethering), TF-A (BL33 hand-off without a DTB) and unicorn (the x64 Engine's system mode) |
 | `X64Engine/` | x64 Engine source; `Platform/OrangePi/OrangePiZero2W/Binaries/X64Engine` has the prebuilt `X64Engine.efi` (`scripts/build-x64engine.sh`) |
 | `scripts/` | Build and SD image scripts |
 
@@ -105,7 +134,7 @@ setup screenshots were taken.
 
 - HDMI EDID cannot be read on this board, the output is always 1920x1080.
 - Only the USB host port works, the OTG port on the power connector has no driver.
-- No Wi-Fi, Bluetooth or network boot.
+- No Wi-Fi or Bluetooth. USB network adapters work, but there is no network boot (PXE / HTTP) yet.
 - Linux: the firmware hands the mainline H618 device tree to the OS, but booting Linux is not tested yet.
 - Plug USB devices in before power-on; hot-plugging while the boot menu is open can hang the board.
 - Windows cannot use the microSD card (the controller is not SDHCI); install it on a USB drive.

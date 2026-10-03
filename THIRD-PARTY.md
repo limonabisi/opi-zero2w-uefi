@@ -6,6 +6,7 @@
 | OHCI driver (from the EDK2 Quark platform) | `Silicon/Allwinner/H616Pkg/Drivers/OhciDxe` | BSD-2-Clause-Patent, Copyright (c) 2013-2016 Intel Corporation |
 | SD-backed variable store (based on the Raspberry Pi 4 port) | `Platform/OrangePi/OrangePiZero2W/Drivers/VarBlockServiceDxe` | BSD-2-Clause-Patent, Copyright (c) 2018 Andrei Warkentin |
 | Poppins font (rendered to bitmaps in `Assets.h`) | `Platform/OrangePi/OrangePiZero2W/Applications/OpiSetup` | SIL Open Font License 1.1, see `OFL.txt` there |
+| DejaVu Sans Mono (rendered to 8x16 bitmaps in `font8x16.h`, the x64 Engine's F11 counters) | `X64Engine/font8x16.h` | Bitstream Vera Fonts licence / public domain (DejaVu changes) |
 | Microsoft Secure Boot certificates (KEK, db) | `Platform/OrangePi/OrangePiZero2W/SecureBootKeys` | Public certificates from [microsoft/secureboot_objects](https://github.com/microsoft/secureboot_objects) |
 | MultiArchUefiPkg (build setup and libraries for the x64 Engine) | `Platform/OrangePi/OrangePiZero2W/Binaries/X64Engine` (binary), source: [intel/MultiArchUefiPkg](https://github.com/intel/MultiArchUefiPkg) @ `ea23ded14ba2` + `patches/multiarchuefipkg-0001-opi-zero2w.patch` | LGPL-2.1 |
 | unicorn-for-efi (CPU core of the x64 Engine) | source: [intel/unicorn-for-efi](https://github.com/intel/unicorn-for-efi) @ `40a8d07ba3ce` + `patches/unicorn-0001-cpuid-fpu-tsc.patch`, `patches/unicorn-0002-x64-engine-system-mode.patch` | GPL-2.0 |

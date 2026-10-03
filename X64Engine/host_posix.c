@@ -226,10 +226,18 @@ host_net_send (const void *frame, uint32_t len)
   return sendto (net_fd, frame, len, 0, (struct sockaddr *)&net_peer, sizeof (net_peer)) == (ssize_t)len ? 0 : -1;
 }
 
+int x64e_opt_nobulk, x64e_opt_nokchain, x64e_opt_nolookup, x64e_opt_nounpack;
+
 void
 host_perf (uint64_t out[2])
 {
   out[0] = out[1] = 0;
+}
+
+uint64_t
+host_free_mb (void)
+{
+  return 0;
 }
 
 int
@@ -286,6 +294,10 @@ main (int argc, char **argv)
     return 1;
   }
 
+  x64e_opt_nobulk   = getenv ("X64E_NOBULK") != NULL;
+  x64e_opt_nokchain = getenv ("X64E_NOKCHAIN") != NULL;
+  x64e_opt_nolookup = getenv ("X64E_NOLOOKUP") != NULL;
+  x64e_opt_nounpack = getenv ("X64E_NOUNPACK") != NULL;
   clock_gettime (CLOCK_MONOTONIC, &ts);
   t0 = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 
@@ -411,6 +423,10 @@ main (int argc, char **argv)
     return 1;
   }
 
+  if (ird && !getenv ("X64E_ISO") && !getenv ("X64E_HD")) {
+    linux_initrd_unpack (&m);
+  }
+
   if (isatty (0)) {
     tcgetattr (0, &tio);
     cfmakeraw (&tio);
@@ -419,6 +435,7 @@ main (int argc, char **argv)
   }
 
   m.console_to_kbd = getenv ("X64E_KBD") != NULL;
+  m.overlay        = getenv ("X64E_OVERLAY") != NULL;
   fb_machine = &m;
   machine_run (&m);
   return 0;

@@ -7,7 +7,7 @@
 State: Active
 Codename: opizero2w
 SoC: Allwinner H618 (4x Cortex-A53, 1 GB LPDDR4)
-Version: 0.12.2-h618
+Version: 0.13.0-h618
 
 Contributors: limonabisi
 
@@ -37,10 +37,11 @@ Legend: ✅ Working · ⚠️ Partially working · ❌ Not working · ❓ Not te
 | FAT | | ✅ |
 | Ext4 | Driver included | ❓ |
 | SPI Flash | Boot from SPI not supported | ❌ |
-| Network Boot | No Ethernet on the board, no USB NIC driver | ❌ |
+| USB Network | USB network adapters through SNP: Android phone USB tethering (RNDIS) tested; CDC-NCM and CDC-ECM adapters not tested | ⚠️ |
+| Network Boot | No PXE / HTTP boot stack | ❌ |
 | TPM | No hardware TPM | ❌ |
 | Windows Boot | Windows 10 ARM64 from a USB drive | ✅ |
-| x64 Engine | Whole x86-64 PC: boots x86-64 ISOs and the installed system (HDMI, USB keyboard, ISO + hard disk on the SD card, network through a USB adapter / phone tethering). Shadow MMU: x86 memory accesses run directly on the ARM MMU (X64E.CFG `shadow=0` turns it off). Still slower than native | ⚠️ |
+| x64 Engine | Whole x86-64 PC: boots x86-64 Linux ISOs (written to a USB drive, or as files on FAT32 / exFAT / Ventoy), installs to the microSD card and boots the installed system; HDMI, USB keyboard, network through a USB adapter or phone tethering; 768 MB for the x86 machine. Shadow MMU, native bulk copies and initrd unpacking (see README). An emulator: a small fraction of native speed | ⚠️ |
 | Linux Boot | Mainline H618 device tree is handed to the OS next to ACPI | ❓ |
 
 ## OS Status

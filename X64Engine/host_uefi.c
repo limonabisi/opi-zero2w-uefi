@@ -202,7 +202,7 @@ host_poll_input (machine_t *m)
         if (k.ScanCode >= SCAN_F1 && k.ScanCode <= SCAN_F10) {
           kbd_type_key (m, KEY_F1 + (k.ScanCode - SCAN_F1));
         } else if (k.ScanCode == SCAN_F11) {
-          kbd_type_key (m, KEY_F1 + 10);
+          m->overlay = !m->overlay;      /* the engine's counters on the screen */
         }
 
         break;
@@ -1288,12 +1288,20 @@ flush_disks (void)
  * Optional \EFI\X64ENGINE\X64E.CFG next to the engine, "key=value" lines:
  *   shadow=0   no shadow MMU (all guest accesses through the softmmu)
  *   el1=0      stay at EL2 (implies shadow=0)
+ *   unpack=0   the x86 kernel unpacks its initrd itself (slow)
+ *   lookup=0   block lookups always through the helper (no inline lookup)
+ *   kchain=0   kernel blocks are not chained directly across pages
+ *   bulk=0     REP MOVS / STOS one element at a time (no native copies)
+ *   stats=1    start with the engine's counters on the screen (F11 toggles them)
+ *   serial=1   the x86 kernel also logs to its COM1 = the board's UART, with
+ *              all messages (debugging; the UART is slow, booting waits for it)
  *   aslr=1     leave address space randomization on in the x86 system
  *              (off by default: with it every new process runs the same
  *              programs at new addresses, and all their code has to be
  *              translated again)
  */
-static int mCfgShadow = 1, mCfgEl1 = 1, mCfgAslr = 0;
+static int mCfgShadow = 1, mCfgEl1 = 1, mCfgAslr = 0, mCfgSerial = 0, mCfgStats = 0;
+int        x64e_opt_nobulk, x64e_opt_nokchain, x64e_opt_nolookup, x64e_opt_nounpack;
 
 static void
 read_config (EFI_HANDLE ImageHandle)
@@ -1321,8 +1329,20 @@ read_config (EFI_HANDLE ImageHandle)
         mCfgShadow = buf[i + 7] == '1';
       } else if (strncmp (buf + i, "el1=", 4) == 0) {
         mCfgEl1 = buf[i + 4] == '1';
+      } else if (strncmp (buf + i, "stats=", 6) == 0) {
+        mCfgStats = buf[i + 6] == '1';
+      } else if (strncmp (buf + i, "serial=", 7) == 0) {
+        mCfgSerial = buf[i + 7] == '1';
       } else if (strncmp (buf + i, "aslr=", 5) == 0) {
         mCfgAslr = buf[i + 5] == '1';
+      } else if (strncmp (buf + i, "bulk=", 5) == 0) {
+        x64e_opt_nobulk = buf[i + 5] == '0';
+      } else if (strncmp (buf + i, "kchain=", 7) == 0) {
+        x64e_opt_nokchain = buf[i + 7] == '0';
+      } else if (strncmp (buf + i, "lookup=", 7) == 0) {
+        x64e_opt_nolookup = buf[i + 7] == '0';
+      } else if (strncmp (buf + i, "unpack=", 7) == 0) {
+        x64e_opt_nounpack = buf[i + 7] == '0';
       }
     }
   }
@@ -1349,6 +1369,12 @@ x64e_slowpath_entry (uint64_t host_pc)
 }
 
 static uint64_t mFaultCount, mFaultNs;
+
+uint64_t
+host_free_mb (void)
+{
+  return free_memory_mb ();
+}
 
 void
 host_perf (uint64_t out[2])
@@ -1495,8 +1521,9 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   CHAR16                       installed[128];
   iso_t                        iso, *vol;
   INTN                         sel, src, ent;
+  int                          r;
   UINTN                        i, first;
-  UINT64                       free_mb, guest_mb;
+  UINT64                       free_mb, guest_mb, reserve;
   uint8_t                      mac[6];
   BOOLEAN                      have_net;
 
@@ -1578,11 +1605,15 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
 
   /*
    * Guest RAM: what is free minus the translation cache (100 MB), the
-   * kernel image being loaded and a reserve for the firmware's own drivers
-   * (USB DMA buffers etc.).
+   * shadow page tables (16 MB) and a reserve for the engine's own data,
+   * the kernel image while it is loaded and the firmware's drivers (USB
+   * DMA buffers etc.). Measured with the Ubuntu installer running, the
+   * engine uses about 135 MB in all with the shadow MMU; without it the
+   * software TLBs can grow much larger, so more is held back.
    */
   free_mb  = free_memory_mb ();
-  guest_mb = free_mb > 100 + 32 + 128 + 128 + 24 ? free_mb - 100 - 32 - 128 - 24 : 128;
+  reserve  = mCfgShadow && mCfgEl1 ? 100 + 16 + 80 : 100 + 32 + 128 + 24;
+  guest_mb = free_mb > reserve + 128 ? free_mb - reserve : 128;
   guest_mb = guest_mb > 1024 ? 1024 : guest_mb & ~31ULL;
   host_log ("x64e: %lu MB free, %lu MB for the x86 machine\n", free_mb, guest_mb);
   Print (L"  Memory: %lu MB free, %lu MB for the x86 machine\n", free_mb, guest_mb);
@@ -1592,6 +1623,7 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
     return EFI_OUT_OF_RESOURCES;
   }
 
+  m.overlay = mCfgStats;
   host_log ("x64e: %u MB guest RAM\n", (unsigned)(m.ram_size >> 20));
   m.boot_ns = epoch_seconds () * 1000000000ULL;
 
@@ -1621,9 +1653,21 @@ X64EngineMain (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
     }
   }
 
-  if (iso_boot (&m, vol, &bl.e[ent],
-                mCfgAslr ? "console=ttyS0,115200 console=tty0 loglevel=6 nolapic noapic"
-                         : "console=ttyS0,115200 console=tty0 loglevel=6 nolapic noapic norandmaps")) {
+  {
+    static char extra[160];
+
+    /*
+     * The kernel's console is the screen. Its COM1 is the board's UART,
+     * 115200 baud: with the boot log on it the machine would mostly wait
+     * for characters to leave (serial=1 turns that on for debugging).
+     */
+    snprintf (extra, sizeof (extra), "%snolapic noapic%s",
+              mCfgSerial ? "console=ttyS0,115200 console=tty0 loglevel=6 " : "",
+              mCfgAslr ? "" : " norandmaps");
+    r = iso_boot (&m, vol, &bl.e[ent], extra);
+  }
+
+  if (r) {
     Print (L"  Could not load the kernel. Press any key.\n");
     gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &i);
     return EFI_LOAD_ERROR;
